@@ -605,7 +605,13 @@ async function saveShortMemoryFromEditor(options = {}) {
     const sourceUserName = currentRecord && currentRecord.sourceUserName
         ? currentRecord.sourceUserName
         : (chatType === 'group' ? chat.name : (chat.wechatUserId || chat.myName || chat.remarkName || chat.realName || 'uwu'));
-    await saveShortMemoryItemsForChat(chatType, chatId, getShortMemoryEditorItems(), {
+    const editedItems = getShortMemoryEditorItems();
+    // 编辑器只展示发送窗口；保存时保留窗口外的历史，避免为了修正一条消息误删旧上下文。
+    const maxItems = Math.max(1, parseInt(chat.maxMemory, 10) || 20);
+    const hiddenItems = currentRecord && currentRecord.useShadowContext && Array.isArray(currentRecord.items)
+        ? normalizeShortMemoryItems(currentRecord.items).slice(0, -maxItems)
+        : [];
+    await saveShortMemoryItemsForChat(chatType, chatId, hiddenItems.concat(editedItems), {
         chat,
         sourceUserName,
         useShadowContext: true
