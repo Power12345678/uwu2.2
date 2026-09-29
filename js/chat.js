@@ -295,8 +295,10 @@ function setupChatRoom() {
             messageInput.focus();
         }, 50);
     });
-    messageInput.addEventListener('keypress', (e) => {
-        if (e.key === 'Enter' && !isGenerating) sendMessage();
+    messageInput.addEventListener('keydown', async (e) => {
+        if (e.key !== 'Enter' || e.shiftKey || e.isComposing || e.keyCode === 229) return;
+        e.preventDefault();
+        if (!isGenerating) await sendMessageAndGetReply();
     });
 
     // 监听输入框聚焦事件：自动收起底部面板，避免与键盘冲突
@@ -742,11 +744,11 @@ function openChatRoom(chatId, type) {
 
 async function sendMessage() {
     const text = messageInput.value.trim();
-    if (!text || isGenerating) return;
+    if (!text || isGenerating) return false;
     messageInput.value = '';
     const chat = (currentChatType === 'private') ? db.characters.find(c => c.id === currentChatId) : db.groups.find(g => g.id === currentChatId);
 
-    if (!chat) return;
+    if (!chat) return false;
     if (!chat.history) chat.history = [];
 
     if (db.apiSettings && db.apiSettings.timePerceptionEnabled) {
@@ -835,6 +837,17 @@ async function sendMessage() {
     if (currentQuoteInfo) {
         cancelQuoteReply();
     }
+    return true;
+}
+
+async function sendMessageAndGetReply() {
+    const chatId = currentChatId;
+    const chatType = currentChatType;
+    const sent = await sendMessage();
+    if (!sent || isGenerating || !chatId || !chatType) return;
+    // 防止发送保存期间用户切换会话，API 回复落到错误聊天中。
+    if (currentChatId !== chatId || currentChatType !== chatType) return;
+    await getAiReply(chatId, chatType);
 }
 
 // 备份提示

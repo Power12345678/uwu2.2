@@ -6,6 +6,9 @@ let selectedCoreMemoryKeys = new Set();
 let currentCoreMemoryDetailKey = null;
 let coreMemorySearchQuery = '';
 let memoryBankActiveTab = 'core';
+const CORE_MEMORY_PAGE_SIZE = 100;
+let coreMemoryVisibleLimit = CORE_MEMORY_PAGE_SIZE;
+let coreMemoryRenderScope = '';
 
 function getCurrentMemoryChat() {
     const chatType = currentChatType === 'group' ? 'group' : 'private';
@@ -76,6 +79,7 @@ function setupMemoryJournalScreen() {
             const tabBtn = event.target.closest('[data-memory-tab]');
             if (!tabBtn) return;
             memoryBankActiveTab = tabBtn.dataset.memoryTab || 'core';
+            coreMemoryVisibleLimit = CORE_MEMORY_PAGE_SIZE;
             if (memoryBankActiveTab === 'short') {
                 coreMemoryManageMode = false;
                 selectedCoreMemoryKeys.clear();
@@ -119,6 +123,7 @@ function setupMemoryJournalScreen() {
         searchInput.placeholder = '搜索核心记忆摘要或关键词...';
         searchInput.addEventListener('input', (event) => {
             coreMemorySearchQuery = event.target.value.trim();
+            coreMemoryVisibleLimit = CORE_MEMORY_PAGE_SIZE;
             renderJournalList(coreMemorySearchQuery);
         });
     }
@@ -314,6 +319,12 @@ function renderJournalList(searchQuery = coreMemorySearchQuery) {
     const { chat, chatType, chatId } = getCurrentMemoryChat();
     if (!chat || !chatId) return;
 
+    const renderScope = `${chatType}:${chatId}:${memoryBankActiveTab}:${String(searchQuery || '')}`;
+    if (renderScope !== coreMemoryRenderScope) {
+        coreMemoryRenderScope = renderScope;
+        coreMemoryVisibleLimit = CORE_MEMORY_PAGE_SIZE;
+    }
+
     if (memoryBankActiveTab === 'short') {
         renderShortMemoryPanel(container, placeholder, chat, chatType, chatId);
         return;
@@ -346,6 +357,8 @@ function renderJournalList(searchQuery = coreMemorySearchQuery) {
     }
 
     items = items.slice().reverse();
+    const totalMatchedItems = items.length;
+    const visibleItems = items.slice(0, coreMemoryVisibleLimit);
 
     if ((!items || items.length === 0) && !generatingChatId) {
         if (placeholder) {
@@ -363,7 +376,7 @@ function renderJournalList(searchQuery = coreMemorySearchQuery) {
         container.appendChild(loadingCard);
     }
 
-    items.forEach((item, index) => {
+    visibleItems.forEach((item) => {
         const source = allItems.indexOf(item) >= Math.max(0, allItems.length - recentCount) ? '短期池' : '长期池';
         const card = document.createElement('li');
         card.className = 'journal-card core-memory-card';
@@ -383,6 +396,18 @@ function renderJournalList(searchQuery = coreMemorySearchQuery) {
         `;
         container.appendChild(card);
     });
+
+    if (visibleItems.length < totalMatchedItems) {
+        const remaining = totalMatchedItems - visibleItems.length;
+        const loadMore = document.createElement('li');
+        loadMore.className = 'journal-card core-memory-load-more';
+        loadMore.style.cssText = 'cursor:default;text-align:center;padding:12px;';
+        loadMore.innerHTML = `
+            <div style="font-size:12px;color:#888;margin-bottom:8px;">已显示 ${visibleItems.length} / ${totalMatchedItems} 条</div>
+            <button type="button" class="btn btn-secondary btn-small" id="core-memory-load-more-btn" style="width:100%;">继续加载（剩余 ${remaining} 条）</button>
+        `;
+        container.appendChild(loadMore);
+    }
     updateCoreMemoryMultiSelectBar();
 }
 
@@ -417,6 +442,16 @@ function renderCoreMemoryOverview(container, stats) {
 }
 
 function handleCoreMemoryListClick(event) {
+    const loadMoreBtn = event.target.closest('#core-memory-load-more-btn');
+    if (loadMoreBtn) {
+        const container = document.getElementById('journal-list-container');
+        const scrollContainer = container ? container.closest('.content') : null;
+        const previousScrollTop = scrollContainer ? scrollContainer.scrollTop : 0;
+        coreMemoryVisibleLimit += CORE_MEMORY_PAGE_SIZE;
+        renderJournalList();
+        if (scrollContainer) requestAnimationFrame(() => { scrollContainer.scrollTop = previousScrollTop; });
+        return;
+    }
     const forceSummaryBtn = event.target.closest('#force-core-summary-btn');
     if (forceSummaryBtn) {
         handleForceCoreMemorySummary();
