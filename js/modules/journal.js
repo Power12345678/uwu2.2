@@ -55,6 +55,7 @@ function setupMemoryJournalScreen() {
     const generateForm = document.getElementById('generate-journal-form');
     const exportBtn = document.getElementById('export-journal-btn');
     const importBtn = document.getElementById('import-journal-btn');
+    const clearAllBtn = document.getElementById('clear-all-core-memory-btn');
     const importInput = document.getElementById('import-journal-file-input');
     const manageBtn = document.getElementById('journal-manage-btn');
     const cancelManageBtn = document.getElementById('journal-cancel-manage-btn');
@@ -172,6 +173,12 @@ function setupMemoryJournalScreen() {
         importBtn.addEventListener('click', () => {
             if (actionSheet) actionSheet.classList.remove('visible');
             if (importInput) importInput.click();
+        });
+    }
+    if (clearAllBtn) {
+        clearAllBtn.addEventListener('click', async () => {
+            if (actionSheet) actionSheet.classList.remove('visible');
+            await clearAllCoreMemories();
         });
     }
     if (importInput) {
@@ -726,6 +733,23 @@ async function deleteCurrentCoreMemoryItem() {
     switchScreen('memory-journal-screen');
     renderJournalList();
     showToast('核心记忆已删除');
+}
+
+async function clearAllCoreMemories() {
+    const { chat } = getCurrentMemoryChat();
+    if (!chat) return;
+    const count = getCurrentCoreMemoryItems().length;
+    if (!count) {
+        showToast('当前没有长期核心记忆');
+        return;
+    }
+    if (!confirm(`确定清空当前角色的全部 ${count} 条长期核心记忆吗？删除后不可恢复。`)) return;
+    await saveCurrentCoreMemoryItems([]);
+    currentCoreMemoryDetailKey = null;
+    selectedCoreMemoryKeys.clear();
+    coreMemoryManageMode = false;
+    renderJournalList();
+    showToast('已清空全部长期核心记忆');
 }
 
 function openCoreMemoryEditModal(item = null, itemKey = null) {
