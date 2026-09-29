@@ -64,6 +64,7 @@ function setupMemoryJournalScreen() {
     const selectAllBtn = document.getElementById('journal-select-all-btn');
     const listContainer = document.getElementById('journal-list-container');
     const editDetailBtn = document.getElementById('edit-journal-detail-btn');
+    const deleteDetailBtn = document.getElementById('delete-journal-detail-btn');
     const saveDetailBtn = document.getElementById('save-journal-detail-btn');
     const bindBtn = document.getElementById('bind-journal-worldbook-btn');
     const shortImportInput = document.getElementById('short-memory-import-input');
@@ -203,6 +204,9 @@ function setupMemoryJournalScreen() {
     if (editDetailBtn) editDetailBtn.addEventListener('click', () => {
         const item = findCurrentCoreMemoryItem(currentCoreMemoryDetailKey);
         if (item) openCoreMemoryEditModal(item, currentCoreMemoryDetailKey);
+    });
+    if (deleteDetailBtn) deleteDetailBtn.addEventListener('click', () => {
+        deleteCurrentCoreMemoryItem();
     });
     if (saveDetailBtn) saveDetailBtn.style.display = 'none';
 
@@ -707,6 +711,21 @@ function openCoreMemoryDetail(key) {
     if (meta) meta.textContent = `${item.timestamp || ''} | 关键词：${normalizeCoreMemoryKeywords(item.keywords || []).join('、') || '无'}`;
     if (content) content.textContent = item.summary || '';
     switchScreen('memory-journal-detail-screen');
+}
+
+async function deleteCurrentCoreMemoryItem() {
+    if (!currentCoreMemoryDetailKey) return;
+    const item = findCurrentCoreMemoryItem(currentCoreMemoryDetailKey);
+    if (!item) return;
+    if (!confirm('确定删除这条核心记忆吗？删除后不可恢复。')) return;
+    const items = getCurrentCoreMemoryItems().filter(entry =>
+        getCoreMemoryItemKey(entry) !== currentCoreMemoryDetailKey
+    );
+    await saveCurrentCoreMemoryItems(items);
+    currentCoreMemoryDetailKey = null;
+    switchScreen('memory-journal-screen');
+    renderJournalList();
+    showToast('核心记忆已删除');
 }
 
 function openCoreMemoryEditModal(item = null, itemKey = null) {
