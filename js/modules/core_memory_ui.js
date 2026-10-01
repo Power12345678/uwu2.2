@@ -78,6 +78,7 @@ function loadCoreMemorySettingsToSidebar(chat) {
     setCoreMemoryElementValue('setting-core-memory-upload-to-ai', !!settings.uploadToAi, 'checked');
     setCoreMemoryElementValue('setting-core-memory-auto-summary', !!settings.autoSummaryByRound, 'checked');
     setCoreMemoryElementValue('setting-core-memory-round-entries', settings.maxChatRoundEntries || 12);
+    setCoreMemoryElementValue('setting-core-memory-summary-retries', Number.isFinite(parseInt(settings.autoSummaryRetryCount, 10)) ? settings.autoSummaryRetryCount : 3);
     setCoreMemoryElementValue('setting-core-memory-recent-count', settings.recentMemoryCount || 70);
     setCoreMemoryElementValue('setting-core-memory-recall-count', settings.archiveRecallCount || 20);
     setCoreMemoryElementValue('setting-core-memory-query-turns', settings.memoryQueryTurns || 3);
@@ -110,6 +111,8 @@ function loadCoreMemorySettingsToSidebar(chat) {
 
     const autoContainer = document.getElementById('setting-core-memory-auto-container');
     if (autoContainer) autoContainer.style.display = settings.autoSummaryByRound ? 'flex' : 'none';
+    const retryContainer = document.getElementById('setting-core-memory-retry-container');
+    if (retryContainer) retryContainer.style.display = settings.autoSummaryByRound ? 'flex' : 'none';
     renderCoreMemoryStats(record);
 }
 
@@ -137,6 +140,7 @@ async function saveCoreMemorySettingsFromSidebar(chat) {
         uploadKeywords: false,
         autoSummaryByRound: autoEl ? autoEl.checked : true,
         maxChatRoundEntries: getCoreMemoryNumberInput('setting-core-memory-round-entries', 12, 1, 200),
+        autoSummaryRetryCount: getCoreMemoryNumberInput('setting-core-memory-summary-retries', 3, 0, 20),
         recentMemoryCount: getCoreMemoryNumberInput('setting-core-memory-recent-count', 70, 1, 500),
         archiveRecallCount: getCoreMemoryNumberInput('setting-core-memory-recall-count', 20, 0, 200),
         memoryRecallMinCount: getCoreMemoryNumberInput('setting-core-memory-recall-count', 20, 0, 200),
@@ -214,6 +218,8 @@ function setupCoreMemoryUI() {
         autoSwitch.addEventListener('change', () => {
             const autoContainer = document.getElementById('setting-core-memory-auto-container');
             if (autoContainer) autoContainer.style.display = autoSwitch.checked ? 'flex' : 'none';
+            const retryContainer = document.getElementById('setting-core-memory-retry-container');
+            if (retryContainer) retryContainer.style.display = autoSwitch.checked ? 'flex' : 'none';
         });
     }
 

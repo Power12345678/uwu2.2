@@ -7,6 +7,7 @@ const CORE_MEMORY_DEFAULT_SETTINGS = {
     uploadKeywords: false,
     autoSummaryByRound: true,
     maxChatRoundEntries: 12,
+    autoSummaryRetryCount: 3,
     recentMemoryCount: 70,
     archiveRecallCount: 20,
     memoryRecallMinCount: 20,

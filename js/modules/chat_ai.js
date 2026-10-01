@@ -976,6 +976,9 @@ async function getAiReply(chatId, chatType, isBackground = false, isSummary = fa
         if (!isBackground) {
             currentReplyAbortController = null;
             isGenerating = false;
+            if (typeof scheduleCoreMemorySummaryCheck === 'function') {
+                scheduleCoreMemorySummaryCheck(chat, chatType, { delay: 0, replacePending: true });
+            }
             getReplyBtn.disabled = false;
             regenerateBtn.disabled = false;
             // 如果正在生成小剧场，不隐藏提示（让小剧场生成过程显示提示）
@@ -1944,7 +1947,11 @@ async function handleAiReplyContent(fullResponse, chat, targetChatId, targetChat
 
         // 回复结束后按微信机器人链路检查核心记忆轮数触发。
         if (typeof checkAndTriggerCoreMemorySummary === 'function') {
-            setTimeout(() => checkAndTriggerCoreMemorySummary(chat, targetChatType), 700);
+            if (typeof scheduleCoreMemorySummaryCheck === 'function') {
+                scheduleCoreMemorySummaryCheck(chat, targetChatType);
+            } else {
+                setTimeout(() => checkAndTriggerCoreMemorySummary(chat, targetChatType), 700);
+            }
         }
 
         // 角色主动生成小剧场（仅私聊，按概率触发）

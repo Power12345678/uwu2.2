@@ -337,37 +337,154 @@ async function summarizeCoreMemoryRounds(chat, chatType, rounds, options = {}) {
     }
 
     record.summaryInProgress = true;
-    await saveCoreMemoryRecord(record);
 
     try {
+        await saveCoreMemoryRecord(record);
         const prompt = buildCoreMemorySummaryPrompt(chat, normalizedType, logs);
         const rawContent = await callCoreMemorySummaryApi(prompt);
         const entry = parseCoreMemorySummaryResponse(rawContent);
 
+        if (!entry || !String(entry.summary || '').trim()) {
+            throw new Error('Core memory summary returned empty content.');
+        }
+
         record.summaryInProgress = false;
+        clearCoreMemorySummaryRuntimeError(chat, normalizedType);
         if (options.updateCursor !== false) {
             record.lastSummarizedRound = Math.max(0, parseInt(options.currentRoundCount, 10) || rounds.length);
         }
-        if (entry && entry.summary) {
-            record.items = mergeCoreMemoryItems(record.items || [], [entry], 'append');
-            cleanupCoreMemoryArchive(record);
-        }
+        record.items = mergeCoreMemoryItems(record.items || [], [entry], 'append');
+        cleanupCoreMemoryArchive(record);
         await saveCoreMemoryRecord(record);
 
-        if (entry && entry.summary && !options.silent && typeof showToast === 'function') {
+        if (!options.silent && typeof showToast === 'function') {
             showToast(options.manual ? '手动核心记忆总结完成' : '核心记忆已更新');
         }
         return entry;
     } catch (error) {
         record.summaryInProgress = false;
         await saveCoreMemoryRecord(record);
-        console.error(options.manual ? '核心记忆手动总结失败:' : '核心记忆自动总结失败:', error);
+        setCoreMemorySummaryRuntimeError(chat, normalizedType, error, {
+            currentRoundCount: options.currentRoundCount,
+            lastSummarizedRound: record.lastSummarizedRound
+        });
         if (!options.silent) {
             if (typeof showApiError === 'function') showApiError(error);
             else if (typeof showToast === 'function') showToast(error.message || '核心记忆总结失败');
         }
         return null;
     }
+}
+
+const CORE_MEMORY_SUMMARY_DEFAULT_RETRIES = 3;
+const coreMemorySummaryCheckTasks = new Map();
+const coreMemorySummaryRuntimeErrors = new Map();
+
+function getCoreMemorySummaryRetryLimit(chat, chatType) {
+    const record = chat && chat.id && typeof getCoreMemoryRecordSync === 'function'
+        ? getCoreMemoryRecordSync(chatType, chat.id)
+        : null;
+    const defaults = typeof getCoreMemoryDefaultSettings === 'function'
+        ? getCoreMemoryDefaultSettings()
+        : {};
+    const settings = Object.assign(defaults, record && record.settings ? record.settings : {});
+    const configured = parseInt(settings.autoSummaryRetryCount, 10);
+    return Math.max(0, Math.min(20, Number.isFinite(configured) ? configured : CORE_MEMORY_SUMMARY_DEFAULT_RETRIES));
+}
+
+function getCoreMemorySummaryRuntimeError(chat, chatType) {
+    if (!chat || !chat.id) return null;
+    return coreMemorySummaryRuntimeErrors.get(getCoreMemorySummaryTaskKey(chat, chatType)) || null;
+}
+
+function setCoreMemorySummaryRuntimeError(chat, chatType, error, context = {}) {
+    if (!chat || !chat.id) return;
+    const details = {
+        message: error && error.message ? error.message : String(error || '未知错误'),
+        stack: error && error.stack ? String(error.stack) : '',
+        at: Date.now(),
+        currentRoundCount: Math.max(0, parseInt(context.currentRoundCount, 10) || 0),
+        lastSummarizedRound: Math.max(0, parseInt(context.lastSummarizedRound, 10) || 0)
+    };
+    const key = getCoreMemorySummaryTaskKey(chat, chatType);
+    coreMemorySummaryRuntimeErrors.set(key, details);
+    console.error('核心记忆总结失败（可在控制台查看）:', details);
+    if (typeof window !== 'undefined' && typeof window.dispatchEvent === 'function' && typeof CustomEvent === 'function') {
+        window.dispatchEvent(new CustomEvent('core-memory-summary-status-changed', { detail: { key } }));
+    }
+}
+
+function clearCoreMemorySummaryRuntimeError(chat, chatType) {
+    if (!chat || !chat.id) return;
+    const key = getCoreMemorySummaryTaskKey(chat, chatType);
+    if (!coreMemorySummaryRuntimeErrors.delete(key)) return;
+    if (typeof window !== 'undefined' && typeof window.dispatchEvent === 'function' && typeof CustomEvent === 'function') {
+        window.dispatchEvent(new CustomEvent('core-memory-summary-status-changed', { detail: { key } }));
+    }
+}
+
+function getCoreMemorySummaryTaskKey(chat, chatType) {
+    return `${getCoreMemoryChatType(chatType)}:${chat && chat.id ? chat.id : ''}`;
+}
+
+function getCoreMemorySummaryRetryDelay(attempt, reason) {
+    if (reason === 'generating') {
+        return Math.min(5000, 350 * Math.pow(2, Math.min(attempt, 4)));
+    }
+    return Math.min(15000, 1000 * Math.pow(2, Math.min(attempt, 3)));
+}
+
+function scheduleCoreMemorySummaryCheck(chat, chatType, options = {}) {
+    if (!chat || !chat.id) return;
+
+    const key = getCoreMemorySummaryTaskKey(chat, chatType);
+    let task = coreMemorySummaryCheckTasks.get(key);
+    if (!task) {
+        task = { timer: null, running: false, attempt: 0, maxRetries: getCoreMemorySummaryRetryLimit(chat, chatType) };
+        coreMemorySummaryCheckTasks.set(key, task);
+    } else {
+        task.maxRetries = getCoreMemorySummaryRetryLimit(chat, chatType);
+    }
+    if (task.running) return;
+    if (task.timer) {
+        if (!options.replacePending) return;
+        clearTimeout(task.timer);
+        task.timer = null;
+    }
+
+    const delay = Number.isFinite(options.delay)
+        ? Math.max(0, options.delay)
+        : (task.attempt === 0 ? 700 : getCoreMemorySummaryRetryDelay(task.attempt - 1, options.reason));
+
+    task.timer = setTimeout(async () => {
+        task.timer = null;
+        task.running = true;
+        let result;
+        try {
+            result = await checkAndTriggerCoreMemorySummary(chat, chatType, {
+                silent: task.attempt > 0
+            });
+        } catch (error) {
+            console.error('Core memory automatic summary check failed:', error);
+            setCoreMemorySummaryRuntimeError(chat, chatType, error);
+            result = { status: 'retry', reason: 'summary-failed' };
+        }
+
+        task.running = false;
+        if (result && result.status === 'retry' && task.attempt < task.maxRetries) {
+            task.attempt += 1;
+            scheduleCoreMemorySummaryCheck(chat, chatType, {
+                reason: result.reason,
+                delay: getCoreMemorySummaryRetryDelay(task.attempt - 1, result.reason)
+            });
+            return;
+        }
+
+        if (result && result.status === 'retry') {
+            console.warn('Core memory automatic summary reached retry limit:', key, result.reason || 'unknown');
+        }
+        coreMemorySummaryCheckTasks.delete(key);
+    }, delay);
 }
 
 async function forceSummarizeCoreMemory(chat, chatType, options = {}) {
@@ -390,29 +507,56 @@ async function forceSummarizeCoreMemory(chat, chatType, options = {}) {
     });
 }
 
-async function checkAndTriggerCoreMemorySummary(chat, chatType) {
-    if (!chat || !chat.id || !Array.isArray(chat.history)) return;
-    if (typeof isGenerating !== 'undefined' && isGenerating) return;
+async function retryFailedCoreMemorySummary(chat, chatType, options = {}) {
+    if (!chat || !chat.id) return null;
+    const normalizedType = getCoreMemoryChatType(chatType);
+    const record = await ensureCoreMemoryRecord(normalizedType, chat.id, { chat });
+    const settings = Object.assign(getCoreMemoryDefaultSettings(), record.settings || {});
+    const interval = Math.max(1, parseInt(settings.maxChatRoundEntries, 10) || 12);
+    const rounds = getCoreMemorySummaryRounds(chat, normalizedType);
+    const lastRound = Math.max(0, parseInt(record.lastSummarizedRound, 10) || 0);
+    const endRound = Math.min(rounds.length, lastRound + interval);
+    const roundsToSummarize = rounds.slice(lastRound, endRound);
+    if (roundsToSummarize.length === 0) {
+        if (!options.silent && typeof showToast === 'function') showToast('没有找到待重试的核心记忆轮次');
+        return null;
+    }
+    return await summarizeCoreMemoryRounds(chat, normalizedType, roundsToSummarize, {
+        manual: true,
+        updateCursor: options.updateCursor !== false,
+        currentRoundCount: endRound,
+        silent: options.silent
+    });
+}
+
+async function checkAndTriggerCoreMemorySummary(chat, chatType, options = {}) {
+    if (!chat || !chat.id || !Array.isArray(chat.history)) return { status: 'done' };
+    if (typeof isGenerating !== 'undefined' && isGenerating) {
+        return { status: 'retry', reason: 'generating' };
+    }
 
     const normalizedType = getCoreMemoryChatType(chatType);
     const record = await ensureCoreMemoryRecord(normalizedType, chat.id, { chat });
     const settings = Object.assign(getCoreMemoryDefaultSettings(), record.settings || {});
-    if (!settings.enabled || !settings.autoSummaryByRound) return;
-    if (record.summaryInProgress) return;
+    if (!settings.enabled || !settings.autoSummaryByRound) return { status: 'done' };
+    if (record.summaryInProgress) return { status: 'retry', reason: 'summary-in-progress' };
 
     const rounds = getCoreMemorySummaryRounds(chat, normalizedType);
     const currentRoundCount = rounds.length;
     const lastRound = Math.max(0, parseInt(record.lastSummarizedRound, 10) || 0);
     const interval = Math.max(1, parseInt(settings.maxChatRoundEntries, 10) || 12);
 
-    if (currentRoundCount - lastRound < interval) return;
+    if (currentRoundCount - lastRound < interval) return { status: 'done' };
 
     const roundsToSummarize = rounds.slice(Math.max(0, currentRoundCount - interval));
-    await summarizeCoreMemoryRounds(chat, normalizedType, roundsToSummarize, {
+    const entry = await summarizeCoreMemoryRounds(chat, normalizedType, roundsToSummarize, {
         updateCursor: true,
         currentRoundCount,
-        silent: false
+        silent: options.silent === true
     });
+    return entry && entry.summary
+        ? { status: 'done', entry }
+        : { status: 'retry', reason: 'summary-failed' };
 }
 
 if (typeof window !== 'undefined') {
@@ -425,7 +569,11 @@ if (typeof window !== 'undefined') {
     window.parseCoreMemorySummaryResponse = parseCoreMemorySummaryResponse;
     window.getCoreMemorySummaryRounds = getCoreMemorySummaryRounds;
     window.forceSummarizeCoreMemory = forceSummarizeCoreMemory;
+    window.retryFailedCoreMemorySummary = retryFailedCoreMemorySummary;
     window.summarizeCoreMemoryRounds = summarizeCoreMemoryRounds;
+    window.scheduleCoreMemorySummaryCheck = scheduleCoreMemorySummaryCheck;
+    window.getCoreMemorySummaryRuntimeError = getCoreMemorySummaryRuntimeError;
+    window.clearCoreMemorySummaryRuntimeError = clearCoreMemorySummaryRuntimeError;
     window.WECHAT_MEMORY_KEYWORD_STOPWORDS_EXTRA = WECHAT_MEMORY_KEYWORD_STOPWORDS_EXTRA;
     window.WECHAT_MEMORY_SUMMARY_PROMPT_TEMPLATE = WECHAT_MEMORY_SUMMARY_PROMPT_TEMPLATE;
     window.WECHAT_MEMORY_IMPORTANCE_PROMPT_TEMPLATE = WECHAT_MEMORY_IMPORTANCE_PROMPT_TEMPLATE;

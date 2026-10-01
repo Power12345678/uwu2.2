@@ -88,6 +88,15 @@ function setupMemoryJournalScreen() {
         });
     }
 
+    if (typeof window !== 'undefined' && !window.__coreMemorySummaryStatusBound) {
+        window.__coreMemorySummaryStatusBound = true;
+        window.addEventListener('core-memory-summary-status-changed', () => {
+            if (memoryBankActiveTab === 'core' && document.getElementById('memory-journal-screen')?.classList.contains('active')) {
+                renderJournalList();
+            }
+        });
+    }
+
     if (bindBtn) {
         bindBtn.title = '导入微信核心记忆';
         bindBtn.addEventListener('click', () => {
@@ -332,6 +341,9 @@ function renderJournalList(searchQuery = coreMemorySearchQuery) {
 
     const record = getCoreMemoryRecordSync(chatType, chatId);
     const settings = Object.assign(getCoreMemoryDefaultSettings(), record && record.settings ? record.settings : {});
+    const summaryError = typeof getCoreMemorySummaryRuntimeError === 'function'
+        ? getCoreMemorySummaryRuntimeError(chat, chatType)
+        : null;
     const allItems = record && Array.isArray(record.items) ? sortCoreMemoryItems(record.items) : [];
     const recentCount = Math.max(1, parseInt(settings.recentMemoryCount, 10) || 70);
     const archiveCount = Math.max(0, allItems.length - recentCount);
@@ -344,7 +356,8 @@ function renderJournalList(searchQuery = coreMemorySearchQuery) {
         recallCount: settings.archiveRecallCount || 20,
         roundInterval: settings.maxChatRoundEntries || 12,
         enabled: settings.enabled,
-        uploadToAi: settings.uploadToAi
+        uploadToAi: settings.uploadToAi,
+        summaryError
     });
 
     let items = allItems;
@@ -416,6 +429,18 @@ function renderCoreMemoryOverview(container, stats) {
     overview.className = 'journal-card core-memory-overview';
     overview.style.cursor = 'default';
     overview.innerHTML = `
+        ${stats.summaryError ? `
+            <div style="margin-bottom:10px; padding:10px; border:1px solid rgba(220,53,69,0.28); background:rgba(220,53,69,0.06); border-radius:8px; color:#9b2432; font-size:12px; line-height:1.5;">
+                <div style="font-weight:600; margin-bottom:4px;">自动总结失败</div>
+                <div>${escapeCoreMemoryHtml(stats.summaryError.message || '未知错误')}</div>
+                <div style="margin-top:4px; color:#777;">失败时间：${escapeCoreMemoryHtml(new Date(stats.summaryError.at).toLocaleString())}</div>
+                <div style="margin-top:4px; color:#777;">错误不会写入核心记忆记录，仅保存在当前页面运行期间。</div>
+                <div style="display:grid; grid-template-columns:1fr 1fr; gap:8px; margin-top:8px;">
+                    <button type="button" class="btn btn-secondary btn-small" id="core-summary-error-console-btn">查看控制台</button>
+                    <button type="button" class="btn btn-primary btn-small" id="retry-core-summary-btn">重试失败总结</button>
+                </div>
+            </div>
+        ` : ''}
         <div class="journal-card-header">
             <div class="journal-card-title">长短期记忆池</div>
         </div>
@@ -441,7 +466,58 @@ function renderCoreMemoryOverview(container, stats) {
     container.appendChild(overview);
 }
 
+function openCoreMemorySummaryConsole() {
+    const { chat, chatType } = getCurrentMemoryChat();
+    const error = typeof getCoreMemorySummaryRuntimeError === 'function'
+        ? getCoreMemorySummaryRuntimeError(chat, chatType)
+        : null;
+    if (error) console.error('核心记忆最近一次总结失败详情:', error);
+
+    if (typeof window.openStorageConsole === 'function') {
+        window.openStorageConsole('error');
+        return;
+    }
+
+    const bar = document.getElementById('storage-console-bar');
+    const errorTab = document.querySelector('.storage-console-tab[data-filter="error"]');
+    if (bar && !document.getElementById('storage-console-widget')?.classList.contains('expanded')) bar.click();
+    if (errorTab) errorTab.click();
+    showToast('已输出最近一次总结错误，请打开底部控制台查看');
+}
+
+async function handleRetryFailedCoreMemorySummary() {
+    const { chat, chatType } = getCurrentMemoryChat();
+    if (!chat) return;
+    const btn = document.getElementById('retry-core-summary-btn');
+    const oldText = btn ? btn.textContent : '';
+    if (btn) {
+        btn.disabled = true;
+        btn.textContent = '重试中...';
+    }
+    try {
+        const entry = typeof retryFailedCoreMemorySummary === 'function'
+            ? await retryFailedCoreMemorySummary(chat, chatType, { updateCursor: true })
+            : null;
+        if (entry) renderJournalList();
+    } finally {
+        if (btn) {
+            btn.disabled = false;
+            btn.textContent = oldText || '重试失败总结';
+        }
+    }
+}
+
 function handleCoreMemoryListClick(event) {
+    const errorConsoleBtn = event.target.closest('#core-summary-error-console-btn');
+    if (errorConsoleBtn) {
+        openCoreMemorySummaryConsole();
+        return;
+    }
+    const retrySummaryBtn = event.target.closest('#retry-core-summary-btn');
+    if (retrySummaryBtn) {
+        handleRetryFailedCoreMemorySummary();
+        return;
+    }
     const loadMoreBtn = event.target.closest('#core-memory-load-more-btn');
     if (loadMoreBtn) {
         const container = document.getElementById('journal-list-container');

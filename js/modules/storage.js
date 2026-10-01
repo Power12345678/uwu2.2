@@ -199,6 +199,17 @@ function setupStorageAnalysisScreen() {
             return div.innerHTML;
         }
 
+        window.openStorageConsole = function (filter) {
+            var nextFilter = filter || 'all';
+            widget.classList.add('expanded');
+            panel.hidden = false;
+            bar.setAttribute('aria-expanded', 'true');
+            var targetTab = document.querySelector('.storage-console-tab[data-filter="' + nextFilter + '"]');
+            if (targetTab) targetTab.click();
+            else renderConsole();
+            listEl.scrollTop = listEl.scrollHeight;
+        };
+
         bar.addEventListener('click', function () {
             var expanded = widget.classList.toggle('expanded');
             panel.hidden = !expanded;
