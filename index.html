@@ -4642,8 +4642,10 @@
                                     <div class="kkt-item-control" style="gap:6px;">
                                         <button type="button" class="btn btn-small" id="core-memory-import-btn">导入</button>
                                         <button type="button" class="btn btn-small" id="core-memory-export-btn">导出</button>
+                                        <button type="button" class="btn btn-small" id="core-memory-sync-bundle-export-btn">导出同步包</button>
                                         <input type="file" id="core-memory-import-input" accept=".json,application/json" style="display:none;">
                                     </div>
+                                    <div id="core-memory-sync-status" style="font-size:12px;color:#999;margin-top:4px;"></div>
                                 </div>
 
                                 <div class="kkt-item" style="display:none;">
@@ -10000,6 +10002,7 @@
     <script src="js/modules/short_memory.js"></script> <!-- 短期记忆：微信 chat_contexts 兼容格式 -->
     <script src="js/modules/core_memory_recall.js"></script> <!-- 核心记忆召回 -->
     <script src="js/modules/core_memory_summary.js"></script> <!-- 核心记忆自动总结 -->
+    <script src="js/modules/core_memory_sync.js"></script> <!-- 本机 bot 一键同步 -->
     <script src="js/modules/core_memory_ui.js"></script> <!-- 核心记忆导入导出与设置 -->
 
     <!-- [2. 核心交互层] -->

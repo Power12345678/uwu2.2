@@ -188,6 +188,8 @@ function setupCoreMemoryUI() {
     const importBtn = document.getElementById('core-memory-import-btn');
     const importInput = document.getElementById('core-memory-import-input');
     const exportBtn = document.getElementById('core-memory-export-btn');
+    const localSyncBtn = document.getElementById('core-memory-local-sync-btn');
+    const bundleExportBtn = document.getElementById('core-memory-sync-bundle-export-btn');
     const autoSwitch = document.getElementById('setting-core-memory-auto-summary');
     const resetStopwordsBtn = document.getElementById('core-memory-reset-stopwords-btn');
     const resetSummaryPromptBtn = document.getElementById('core-memory-reset-summary-prompt-btn');
@@ -210,6 +212,31 @@ function setupCoreMemoryUI() {
             const { chatType, chatId } = getCurrentCoreMemoryContext();
             if (!chatId) return;
             downloadCoreMemoryJson(chatType, chatId);
+        });
+    }
+
+    if (localSyncBtn && !localSyncBtn.dataset.coreMemoryBound) {
+        localSyncBtn.dataset.coreMemoryBound = '1';
+        localSyncBtn.addEventListener('click', async () => {
+            if (typeof syncCurrentUwuChatToLocalBot !== 'function') return;
+            localSyncBtn.disabled = true;
+            try { await syncCurrentUwuChatToLocalBot(); }
+            catch (_) { /* the sync module already rendered the status */ }
+            finally { localSyncBtn.disabled = false; }
+        });
+    }
+
+    if (bundleExportBtn && !bundleExportBtn.dataset.coreMemoryBound) {
+        bundleExportBtn.dataset.coreMemoryBound = '1';
+        bundleExportBtn.addEventListener('click', () => {
+            try {
+                if (typeof downloadUwuMemorySyncBundle !== 'function') throw new Error('同步包模块尚未加载');
+                const bundle = downloadUwuMemorySyncBundle();
+                const status = document.getElementById('core-memory-sync-status');
+                if (status) status.textContent = `已导出同步包：原文 ${bundle.raw_messages.length} 条，摘要 ${bundle.core_memory_items.length} 条`;
+            } catch (error) {
+                if (typeof showToast === 'function') showToast(error.message || '同步包导出失败');
+            }
         });
     }
 

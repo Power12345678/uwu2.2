@@ -142,6 +142,14 @@ node --check js/main.js
 10. 已补齐微信当前开启记忆链路里的多张本地精排词表：泛词、亲密词、事件动词白名单、事件结果词、事件候选阻断词、硬锚点名词白名单、硬锚点阻断词、强制辅助锚点、统一别名表、字母代号词表。小手机召回逻辑会读取这些可编辑表，不再只使用早期轻量小表。
 11. A/B 阶段召回精排已从“轻量近似”升级为小手机前端可运行的完整移植版。主要剩余差异不是功能链路，而是运行环境：微信机器人使用 Python/jieba 分词，小手机浏览器端使用 JS 规则分词 + 核心记忆关键词反扫，因此极少数没有写入 keywords 的中文长句，锚点抽取结果可能与微信后台略有差异。
 
+## 2026-11-19 追加：跨设备文件同步
+
+手机在线访问 uwu 时不能直接连接家里电脑的 loopback 接口，因此跨设备同步使用可携带的 `uwu-memory-sync-bundle-v1` JSON 文件：手机在 CoreMemory 页面点击“导出同步包”，把文件传到电脑，再在新版 Bot 的 Memory Palace → 导入与迁移中点击“一键导入 uwu 同步包”。
+
+同步包包含完整 `chat.history` 中的已完成 user→assistant 轮次和当前 CoreMemory 摘要。Bot 端将原文写入 `memory_messages`，继续由 Palace 自己按正常水位线处理，不强行推进 Palace 游标；摘要进入连续性摘要文件并按“时间 + 正文”去重。只要同步包带有原文，同批摘要不会再重复走外部记忆提取。重复导入会按 `source_id` 去重，编辑后的原文会更新并触发相关记忆失效/重整理。
+
+旧的本机桥接代码保留兼容，但不再是手机跨设备主流程。GitHub Pages 只有在更新 uwu 仓库中的 `index.html`、`js/modules/core_memory_sync.js` 和 `js/modules/core_memory_ui.js` 后才会出现新按钮；本地改动不会自动发布到线上页面。
+
 ## 下一阶段开发方向
 
 下一阶段建议做“私聊微信文字协议真实对话验收 + 特殊能力开关细化”。
@@ -187,3 +195,14 @@ node --check js/main.js
 4. `node --check js/db.js`
 5. Node 模拟空回复两次、第三次成功：`calls = 3`，返回 `ok-after-retry`。
 6. DevTools 打开 `file://.../uwu2.1-main/index.html` 后确认 `#api-retry-count` 存在且默认值为 `2`，`runApiRequestWithRetry/getApiRetryOptions/isEmptyAiResponseText` 均为全局函数。
+
+## 2026-11-19 追加进度：本机 Memory Palace 一键同步
+
+`js/modules/core_memory_sync.js` 与新版机器人 `/api/memory_palace/uwu/local-sync` 组成 `uwu-memory-sync-v1` 本机桥接：
+
+1. 原文从完整 `chat.history` 读取，不受 `chat.maxMemory` 或发送窗口限制；只发送已经完成的 user→assistant 轮次。
+2. `lastSummarizedRound` 之前的内容走 CoreMemory 摘要，之后的完整轮次走 Palace `memory_messages` 原文，防止同一轮双写。
+3. 原文以稳定 `source_id` 和 `generation_id` 去重；摘要由本机增量账本去重，导入失败不推进账本。
+4. 浏览器保存同步快照；历史摘要前缀只有在 uwu 正文被编辑时才补发对应消息，Palace 会递增来源版本并让相关旧卡重新整理。
+5. bot 暂时不可达时同步包放在浏览器 outbox；下次在同一台电脑打开 uwu 后自动尝试补发。
+6. 只允许 loopback 请求。手机在外面、电脑关机时无法直接访问本机接口；跨设备自动同步需要额外中转或文件传输。
