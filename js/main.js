@@ -78,6 +78,7 @@ const init = async () => {
     setupBottomNavigation();
     setupAddCharModal();
     setupChatRoom();
+    if (typeof setupMessageNotifications === 'function') setupMessageNotifications();
     setupChatSettings();
     setupArchiveApp();
     setupApiSettingsApp();

@@ -7691,6 +7691,14 @@
                     </div>
 
                     <div class="kkt-group">
+                        <div class="kkt-item" style="flex-direction:column;align-items:stretch;">
+                            <div class="kkt-item-label">消息提醒方式</div>
+                            <select id="message-alert-mode" style="padding:10px;border:1px solid #ddd;border-radius:8px;background:#fff;">
+                                <option value="system">跟随系统（iPhone 静音/触感设置）</option>
+                                <option value="silent">完全静音</option>
+                                <option value="sound">播放已设置的提示音</option>
+                            </select>
+                        </div>
                         <!-- 总开关 -->
                         <div class="kkt-item">
                             <div class="kkt-item-label">启用系统通知</div>
@@ -10002,6 +10010,7 @@
     <script src="js/db.js"></script> <!-- 数据层：Dexie数据库配置、全局变量定义、数据存取 -->
     <script src="js/modules/core_memory.js"></script> <!-- 核心记忆：微信机器人兼容格式 -->
     <script src="js/modules/short_memory.js"></script> <!-- 短期记忆：微信 chat_contexts 兼容格式 -->
+    <script src="js/modules/message_notifications.js"></script>
     <script src="js/modules/core_memory_recall.js"></script> <!-- 核心记忆召回 -->
     <script src="js/modules/core_memory_summary.js"></script> <!-- 核心记忆自动总结 -->
     <script src="js/modules/core_memory_sync.js"></script> <!-- 本机 bot 一键同步 -->

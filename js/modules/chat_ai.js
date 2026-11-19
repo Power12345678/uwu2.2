@@ -244,9 +244,27 @@ async function generateImageDescription(msg, chat, apiConfig) {
     }
 }
 
+const activeChatReplyRequests = new Map();
+
+function syncChatReplyControls() {
+    const key = `${currentChatType}:${currentChatId}`;
+    const active = activeChatReplyRequests.get(key);
+    isGenerating = !!active;
+    currentReplyAbortController = active ? active.controller : null;
+    getReplyBtn.disabled = !!active;
+    regenerateBtn.disabled = !!active;
+    if (active) {
+        typingIndicator.textContent = `“${active.name}”正在输入中...`;
+        typingIndicator.style.display = 'block';
+    } else if (typingIndicator && typingIndicator.getAttribute('data-theater-generating') !== 'true') {
+        typingIndicator.style.display = 'none';
+    }
+}
+
 // AI 交互逻辑
 async function getAiReply(chatId, chatType, isBackground = false, isSummary = false, isCharBlockedMonologue = false, isPhoneControlRevokeAttempt = false) {
-    if (isGenerating && !isBackground) return;
+    const requestKey = `${chatType}:${chatId}`;
+    if (activeChatReplyRequests.has(requestKey)) return;
 
     // 拉黑检查：被拉黑的角色不回复（角色拉黑用户后的「让TA说说」不在此列）
     if (chatType === 'private' && !isCharBlockedMonologue) {
@@ -304,14 +322,16 @@ async function getAiReply(chatId, chatType, isBackground = false, isSummary = fa
     const chat = (chatType === 'private') ? db.characters.find(c => c.id === chatId) : db.groups.find(g => g.id === chatId);
     if (!chat) return;
 
+    if (typeof hasPendingChatPersistence === 'function' && hasPendingChatPersistence(chatType, chatId)) {
+        try { await retryPendingChatPersistence(); }
+        catch (error) { showApiError(error); return; }
+        if (activeChatReplyRequests.has(requestKey)) return;
+    }
+    const requestController = new AbortController();
+    activeChatReplyRequests.set(requestKey, { controller: requestController, name: chat.remarkName || chat.name || chat.realName || '对方' });
+    syncChatReplyControls();
+
     if (!isBackground) {
-        currentReplyAbortController = new AbortController();
-        isGenerating = true;
-        getReplyBtn.disabled = true;
-        regenerateBtn.disabled = true;
-        const typingName = chatType === 'private' ? chat.remarkName : chat.name;
-        typingIndicator.textContent = `“${typingName}”正在输入中...`;
-        typingIndicator.style.display = 'block';
         messageArea.scrollTop = messageArea.scrollHeight;
     }
 
@@ -881,7 +901,7 @@ async function getAiReply(chatId, chatType, isBackground = false, isSummary = fa
         const retrySettings = Object.assign({}, db.apiSettings || {}, apiConfig || {});
         const retryOptions = typeof getApiRetryOptions === 'function'
             ? getApiRetryOptions(retrySettings, {
-                signal: currentReplyAbortController ? currentReplyAbortController.signal : undefined,
+                signal: requestController.signal,
                 notify: !isBackground
             })
             : { retryCount: 0, retryDelayMs: 0, retryOnEmpty: true };
@@ -890,7 +910,7 @@ async function getAiReply(chatId, chatType, isBackground = false, isSummary = fa
                 method: 'POST',
                 headers: headers,
                 body: JSON.stringify(requestBody),
-                signal: currentReplyAbortController ? currentReplyAbortController.signal : undefined
+                signal: requestController.signal
             });
             if (!response.ok) {
                 const error = new Error(`API Error: ${response.status} ${await response.text()}`);
@@ -899,7 +919,7 @@ async function getAiReply(chatId, chatType, isBackground = false, isSummary = fa
             }
             
             if (streamEnabled) {
-                return await processStream(response, chat, provider, chatId, chatType, isBackground, isCharBlockedMonologue);
+                return await processStream(response, chat, provider, chatId, chatType, isBackground, isCharBlockedMonologue, true);
             } else {
                 let result;
                 try {
@@ -955,15 +975,14 @@ async function getAiReply(chatId, chatType, isBackground = false, isSummary = fa
                     throw (typeof makeApiEmptyResponseError === 'function' ? makeApiEmptyResponseError() : new Error('API returned an empty response'));
                 }
                 
-                await handleAiReplyContent(fullResponse, chat, chatId, chatType, isBackground, isCharBlockedMonologue);
                 return fullResponse;
             }
         };
-        if (typeof runApiRequestWithRetry === 'function') {
-            await runApiRequestWithRetry(executeMainChatApiCall, retryOptions, 'main chat API');
-        } else {
-            await executeMainChatApiCall(0);
-        }
+        const fullResponse = typeof runApiRequestWithRetry === 'function'
+            ? await runApiRequestWithRetry(executeMainChatApiCall, retryOptions, 'main chat API')
+            : await executeMainChatApiCall(0);
+        // Storage/rendering errors must never retry a successful paid request.
+        await handleAiReplyContent(fullResponse, chat, chatId, chatType, isBackground, isCharBlockedMonologue);
 
     } catch (error) {
         if (error.name === 'AbortError') {
@@ -973,53 +992,45 @@ async function getAiReply(chatId, chatType, isBackground = false, isSummary = fa
             else console.error("Background Auto-Reply Error:", error);
         }
     } finally {
+        activeChatReplyRequests.delete(requestKey);
+        syncChatReplyControls();
         if (!isBackground) {
-            currentReplyAbortController = null;
-            isGenerating = false;
             if (typeof scheduleCoreMemorySummaryCheck === 'function') {
                 scheduleCoreMemorySummaryCheck(chat, chatType, { delay: 0, replacePending: true });
-            }
-            getReplyBtn.disabled = false;
-            regenerateBtn.disabled = false;
-            // 如果正在生成小剧场，不隐藏提示（让小剧场生成过程显示提示）
-            if (!typingIndicator || typingIndicator.getAttribute('data-theater-generating') !== 'true') {
-                typingIndicator.style.display = 'none';
             }
         }
     }
 }
 
-async function processStream(response, chat, apiType, targetChatId, targetChatType, isBackground = false, isCharBlockedMonologue = false) {
+async function processStream(response, chat, apiType, targetChatId, targetChatType, isBackground = false, isCharBlockedMonologue = false, parseOnly = false) {
     const reader = response.body.getReader(), decoder = new TextDecoder();
-    let fullResponse = "", accumulatedChunk = "";
-    for (; ;) {
-        const {done, value} = await reader.read();
-        if (done) break;
-        accumulatedChunk += decoder.decode(value, {stream: true});
-        if (apiType === "openai" || apiType === "deepseek" || apiType === "claude" || apiType === "newapi") {
-            const parts = accumulatedChunk.split("\n\n");
-            accumulatedChunk = parts.pop();
-            for (const part of parts) {
-                if (part.startsWith("data: ")) {
-                    const data = part.substring(6);
-                    if (data.trim() !== "[DONE]") {
-                        try {
-                            fullResponse += JSON.parse(data).choices[0].delta?.content || "";
-                        } catch (e) { 
-                        }
-                    }
-                }
-            }
+    let fullResponse = "", wireText = "";
+    try {
+        for (;;) {
+            const {done, value} = await reader.read();
+            if (done) break;
+            wireText += decoder.decode(value, {stream: true});
         }
+        wireText += decoder.decode();
+    } finally {
+        if (typeof reader.releaseLock === 'function') reader.releaseLock();
     }
-    if (apiType === "gemini") {
-        try {
-            const parsedStream = JSON.parse(accumulatedChunk);
-            fullResponse = parsedStream.map(item => item.candidates?.[0]?.content?.parts?.[0]?.text || "").join('');
-        } catch (e) {
-            console.error("Error parsing Gemini stream:", e, "Chunk:", accumulatedChunk);
-            if (!isBackground) showToast("解析Gemini响应失败");
-            throw new Error("Failed to parse Gemini stream response");
+    if (apiType === 'gemini' && !wireText.trimStart().startsWith('data:')) {
+        const parsed = JSON.parse(wireText);
+        const items = Array.isArray(parsed) ? parsed : [parsed];
+        fullResponse = items.map(item => (item.candidates?.[0]?.content?.parts || [])
+            .map(part => part.text || '').join('')).join('');
+    } else {
+        // Process the EOF frame too, even without a trailing blank line.
+        for (const frame of wireText.replace(/\r\n/g, '\n').split('\n\n')) {
+            const data = frame.split('\n').filter(line => line.startsWith('data:'))
+                .map(line => line.slice(5).trimStart()).join('\n').trim();
+            if (!data || data === '[DONE]') continue;
+            const parsed = JSON.parse(data);
+            if (parsed.error) throw new Error(parsed.error.message || 'Stream API error');
+            fullResponse += apiType === 'gemini'
+                ? (parsed.candidates?.[0]?.content?.parts || []).map(part => part.text || '').join('')
+                : (parsed.choices?.[0]?.delta?.content || '');
         }
     }
     // === 【补丁：补全流式输出时丢失的开头标签】 ===
@@ -1059,7 +1070,7 @@ async function processStream(response, chat, apiType, targetChatId, targetChatTy
     if (typeof isEmptyAiResponseText === 'function' && isEmptyAiResponseText(fullResponse)) {
         throw (typeof makeApiEmptyResponseError === 'function' ? makeApiEmptyResponseError() : new Error('API returned an empty response'));
     }
-    await handleAiReplyContent(fullResponse, chat, targetChatId, targetChatType, isBackground, isCharBlockedMonologue);
+    if (!parseOnly) await handleAiReplyContent(fullResponse, chat, targetChatId, targetChatType, isBackground, isCharBlockedMonologue);
     return fullResponse;
 }
 
@@ -1342,6 +1353,8 @@ function buildPrivateReplyItems(fullResponse, chat) {
 
 async function handleAiReplyContent(fullResponse, chat, targetChatId, targetChatType, isBackground = false, isCharBlockedMonologue = false) {
     const rawResponse = fullResponse;
+    const pendingBubbles = [];
+    const queueReplyBubble = (...args) => pendingBubbles.push(args);
     const shortMemoryHistoryStartLength = Array.isArray(chat.history) ? chat.history.length : 0;
     if (fullResponse) {
         // 1. 移除 [incipere] 标签
@@ -1425,7 +1438,7 @@ async function handleAiReplyContent(fullResponse, chat, targetChatId, targetChat
             }
             
             // 添加到界面气泡（由于 regex 设置，会被隐藏，仅 Debug 模式可见）
-            addMessageBubble(thinkingMsg, targetChatId, targetChatType);
+            queueReplyBubble(thinkingMsg, targetChatId, targetChatType);
             
             // 从即将显示的文本中移除思考内容
             fullResponse = fullResponse.replace(thinkingContent, "");
@@ -1445,9 +1458,7 @@ async function handleAiReplyContent(fullResponse, chat, targetChatId, targetChat
             }
         }
 
-        if (db.globalReceiveSound) {
-            playSound(db.globalReceiveSound);
-        }
+        if (typeof playMessageAlert === 'function') playMessageAlert(db.globalReceiveSound);
         // ... 后续代码保持不变 ...
         console.log('【AI原始返回内容】:', rawResponse);
         let cleanedResponse = fullResponse.replace(/^\[system:.*?\]\s*/, '').replace(/^\(时间:.*?\)\s*/, '');
@@ -1527,7 +1538,7 @@ async function handleAiReplyContent(fullResponse, chat, targetChatId, targetChat
                     timestamp: Date.now()
                 };
                 chat.history.push(message);
-                addMessageBubble(message, targetChatId, targetChatType);
+                queueReplyBubble(message, targetChatId, targetChatType);
                 continue; // 跳过后续处理
             }
 
@@ -1612,7 +1623,7 @@ async function handleAiReplyContent(fullResponse, chat, targetChatId, targetChat
                             chat.useCustomBubbleCss = true;
                             char.currentBubbleCssPresetName = preset.name;
                             if (typeof updateCustomBubbleStyle === 'function') updateCustomBubbleStyle(targetChatId, preset.css, true);
-                            if (typeof saveCurrentChat === 'function') await saveCurrentChat();
+                            if (typeof saveCurrentChat === 'function') await persistChatWithShortMemory(chat, targetChatType);
                             contentAfterStrip = contentAfterStrip.replace(themeSwitchMatch[0], '').replace(/\n{3,}/g, '\n\n').trim();
                         }
                     }
@@ -1627,16 +1638,8 @@ async function handleAiReplyContent(fullResponse, chat, targetChatId, targetChat
                 }
             }
 
-            // 如果是后台模式，跳过延迟，直接处理
-            if (!isBackground) {
-                const delay = firstMessageProcessed ? (900 + Math.random() * 1300) : (400 + Math.random() * 400);
-                await new Promise(resolve => setTimeout(resolve, delay));
-                
-                // 如果开启了多条消息提示音，且不是第一条消息（第一条已由系统默认逻辑播放），则播放提示音
-                if (firstMessageProcessed && db.multiMsgSoundEnabled && db.globalReceiveSound) {
-                    playSound(db.globalReceiveSound);
-                }
-            }
+            // Save the whole reply before presentation. iOS can pause timers
+            // between bubbles and must not leave the short context half saved.
             firstMessageProcessed = true;
 
             const aiWithdrawRegex = /\[(.*?)撤回了一条消息：([\s\S]*?)\]/;
@@ -1669,13 +1672,13 @@ async function handleAiReplyContent(fullResponse, chat, targetChatId, targetChat
                 }
 
                 chat.history.push(message);
-                addMessageBubble(message, targetChatId, targetChatType);
+                queueReplyBubble(message, targetChatId, targetChatType);
                 
                 setTimeout(async () => {
                     message.isWithdrawn = true;
                     message.content = `[${characterName}撤回了一条消息：${originalContent}]`;
                     
-                    await saveCurrentChat();
+                    await persistChatWithShortMemory(chat, targetChatType);
                     
                     if ((targetChatType === 'private' && currentChatId === chat.id) || 
                         (targetChatType === 'group' && currentChatId === chat.id)) {
@@ -1729,7 +1732,7 @@ async function handleAiReplyContent(fullResponse, chat, targetChatId, targetChat
                         };
                         if (isCharBlockedMonologue) message.sentWhileCharBlocked = true;
                         chat.history.push(message);
-                        addMessageBubble(message, targetChatId, targetChatType);
+                        queueReplyBubble(message, targetChatId, targetChatType);
                     } else {
                         let filteredReplyText2 = replyText;
                         if (typeof applyRegexFilter === 'function') {
@@ -1748,7 +1751,7 @@ async function handleAiReplyContent(fullResponse, chat, targetChatId, targetChat
                         };
                         if (isCharBlockedMonologue) message.sentWhileCharBlocked = true;
                         chat.history.push(message);
-                        addMessageBubble(message, targetChatId, targetChatType);
+                        queueReplyBubble(message, targetChatId, targetChatType);
                     }
                 } else {
                     const receivedTransferRegex = new RegExp(`\\[${character.realName}的转账：.*?元；备注：.*?\\]`);
@@ -1804,7 +1807,7 @@ async function handleAiReplyContent(fullResponse, chat, targetChatId, targetChat
                     }
 
                     chat.history.push(message);
-                    addMessageBubble(message, targetChatId, targetChatType);
+                    queueReplyBubble(message, targetChatId, targetChatType);
                 }
 
             } else if (targetChatType === 'group') {
@@ -1843,7 +1846,7 @@ async function handleAiReplyContent(fullResponse, chat, targetChatId, targetChat
                         senderId: senderId
                     };
                     group.history.push(message);
-                    addMessageBubble(message, targetChatId, targetChatType);
+                    queueReplyBubble(message, targetChatId, targetChatType);
                     continue; // 私聊消息处理完毕，跳过后续普通消息匹配
                 }
 
@@ -1865,7 +1868,7 @@ async function handleAiReplyContent(fullResponse, chat, targetChatId, targetChat
                             isTransferAction: true
                         };
                         group.history.push(message);
-                        addMessageBubble(message, targetChatId, targetChatType);
+                        queueReplyBubble(message, targetChatId, targetChatType);
                     }
                     continue;
                 }
@@ -1890,7 +1893,7 @@ async function handleAiReplyContent(fullResponse, chat, targetChatId, targetChat
                             transferStatus: 'pending'
                         };
                         group.history.push(message);
-                        addMessageBubble(message, targetChatId, targetChatType);
+                        queueReplyBubble(message, targetChatId, targetChatType);
                     }
                 } else if (nameMatch || item.char) {
                     const senderName = item.char || (nameMatch[1]);
@@ -1906,7 +1909,7 @@ async function handleAiReplyContent(fullResponse, chat, targetChatId, targetChat
                             senderId: sender.id
                         };
                         group.history.push(message);
-                        addMessageBubble(message, targetChatId, targetChatType);
+                        queueReplyBubble(message, targetChatId, targetChatType);
                     }
                 }
             }
@@ -1921,18 +1924,17 @@ async function handleAiReplyContent(fullResponse, chat, targetChatId, targetChat
                 timestamp: Date.now()
             };
             chat.history.push(summaryMsg);
-            addMessageBubble(summaryMsg, targetChatId, targetChatType);
+            queueReplyBubble(summaryMsg, targetChatId, targetChatType);
         }
 
-        await saveCurrentChat();
-        if (typeof appendShortMemoryTurnFromHistoryDiff === 'function') {
-            try {
-                await appendShortMemoryTurnFromHistoryDiff(targetChatType, targetChatId, chat, shortMemoryHistoryStartLength);
-            } catch (error) {
-                console.error('同步短期记忆失败:', error);
-            }
+        const shortRecord = buildShortMemoryTurnFromHistoryDiff(targetChatType, targetChatId, chat, shortMemoryHistoryStartLength);
+        try {
+            await persistChatWithShortMemory(chat, targetChatType, shortRecord);
+        } finally {
+            // Received text stays visible if storage needs a local retry.
+            for (const args of pendingBubbles) addMessageBubble(...args);
+            renderChatList();
         }
-        renderChatList();
 
         if (targetChatType === 'private' && (chat.source === 'forum' || chat.source === 'peek') && chat.supplementPersonaAiEnabled) {
             setTimeout(function() {

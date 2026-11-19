@@ -863,6 +863,7 @@ function initDatabase() {
                 sysNotifCustomServer: false,
                 sysNotifServerUrl: '',
                 sysNotifServerKey: '',
+                messageAlertMode: 'system',
             }, data.magicRoom || {})
             };
 
@@ -1120,6 +1121,7 @@ const loadData = async () => {
             sysNotifCustomServer: false,
             sysNotifServerUrl: '',
             sysNotifServerKey: '',
+        messageAlertMode: 'system',
         }
     };
     db[key] = settings[key] !== undefined ? settings[key] : (defaultValue[key] !== undefined ? JSON.parse(JSON.stringify(defaultValue[key])) : undefined);

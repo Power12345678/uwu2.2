@@ -123,6 +123,9 @@ async function saveShortMemoryRecord(record) {
     const normalized = normalizeShortMemoryRecord(record);
     normalized.updatedAt = Date.now();
 
+    if (typeof dexieDB !== 'undefined' && dexieDB && dexieDB.shortMemoryContexts) {
+        await dexieDB.shortMemoryContexts.put(normalized);
+    }
     const list = ensureShortMemoryDbArray();
     const index = list.findIndex(item => item.chatKey === normalized.chatKey);
     if (index >= 0) {
@@ -131,9 +134,6 @@ async function saveShortMemoryRecord(record) {
         list.push(normalized);
     }
 
-    if (typeof dexieDB !== 'undefined' && dexieDB && dexieDB.shortMemoryContexts) {
-        await dexieDB.shortMemoryContexts.put(normalized);
-    }
     return normalized;
 }
 
@@ -401,11 +401,10 @@ async function saveShortMemoryItemsForChat(chatType, chatId, items, options = {}
     return await saveShortMemoryRecord(record);
 }
 
-async function appendShortMemoryTurnFromHistoryDiff(chatType, chatId, chat, historyStartLength) {
+function buildShortMemoryTurnFromHistoryDiff(chatType, chatId, chat, historyStartLength) {
     const record = getShortMemoryRecordSync(chatType, chatId);
     if (!record || !record.useShadowContext) return null;
     const userItem = getLatestUserShortMemoryItemFromHistory(chat, historyStartLength, chatType);
-    if (!userItem) return null;
 
     const newMessages = (chat.history || []).slice(historyStartLength || 0);
     const assistantText = newMessages
@@ -418,14 +417,65 @@ async function appendShortMemoryTurnFromHistoryDiff(chatType, chatId, chat, hist
     if (!assistantText || !isShortMemoryAssistantReplyCountable(assistantText)) return null;
 
     const items = normalizeShortMemoryItems(record.items || []);
-    const lastUser = items.slice().reverse().find(item => item.role === 'user');
-    const alreadyHasUser = lastUser && lastUser.content === userItem.content;
-    const nextItems = alreadyHasUser
-        ? items.concat([{ role: 'assistant', content: assistantText, timestamp: Date.now() }])
-        : items.concat([userItem, { role: 'assistant', content: assistantText, timestamp: Date.now() }]);
+    const last = items[items.length - 1];
+    // Only a pending tail user can be reused. An earlier completed round may
+    // contain the same words and must not absorb this new user's message.
+    const alreadyHasUser = userItem && last && last.role === 'user' && last.content === userItem.content;
+    const lastAssistant = newMessages.filter(isShortMemoryAssistantMessage).at(-1);
+    if (lastAssistant && lastAssistant.id && record.lastSyncedAssistantMessageId === lastAssistant.id) return record;
+    const nextItems = items.concat(userItem && !alreadyHasUser ? [userItem] : [],
+        [{ role: 'assistant', content: assistantText, timestamp: lastAssistant && lastAssistant.timestamp || Date.now() }]);
 
     record.items = nextItems;
-    return await saveShortMemoryRecord(record);
+    record.lastSyncedAssistantMessageId = lastAssistant && lastAssistant.id || '';
+    return record;
+}
+
+async function appendShortMemoryTurnFromHistoryDiff(chatType, chatId, chat, historyStartLength) {
+    const record = buildShortMemoryTurnFromHistoryDiff(chatType, chatId, chat, historyStartLength);
+    return record ? await saveShortMemoryRecord(record) : null;
+}
+
+// Failed writes remain in memory for a storage-only retry on foregrounding.
+// Never call the model again to repair a local storage failure.
+const pendingChatPersistence = new Map();
+async function persistChatWithShortMemory(chat, chatType, shortRecord = null) {
+    const key = getShortMemoryChatKey(chatType, chat.id);
+    const oldPending = pendingChatPersistence.get(key);
+    const record = shortRecord || (oldPending && oldPending.shortRecord) || null;
+    pendingChatPersistence.set(key, { chat, chatType, shortRecord: record });
+    try {
+        const table = chatType === 'group' ? dexieDB.groups : dexieDB.characters;
+        if (!table || !dexieDB.transaction) throw new Error('本地数据库尚未就绪');
+        const normalized = record ? normalizeShortMemoryRecord(record) : null;
+        if (normalized) normalized.updatedAt = Date.now();
+        const tables = normalized ? [table, dexieDB.shortMemoryContexts] : [table];
+        await dexieDB.transaction('rw', ...tables, async () => {
+            await table.put(chat);
+            if (normalized) await dexieDB.shortMemoryContexts.put(normalized);
+        });
+        if (normalized) {
+            const list = ensureShortMemoryDbArray();
+            const index = list.findIndex(item => item.chatKey === key);
+            if (index < 0) list.push(normalized); else list[index] = normalized;
+        }
+        pendingChatPersistence.delete(key);
+    } catch (cause) {
+        const error = new Error('回复已收到，但聊天/短期上下文保存失败。请保持页面打开，检查存储空间后重试保存；不会重新请求 AI。');
+        error.name = 'ChatPersistenceError';
+        error.cause = cause;
+        throw error;
+    }
+}
+
+async function retryPendingChatPersistence() {
+    for (const entry of Array.from(pendingChatPersistence.values())) {
+        await persistChatWithShortMemory(entry.chat, entry.chatType, entry.shortRecord);
+    }
+}
+
+function hasPendingChatPersistence(chatType, chatId) {
+    return pendingChatPersistence.has(getShortMemoryChatKey(chatType, chatId));
 }
 
 function splitWechatMessageParts(text, options = {}) {

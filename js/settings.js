@@ -2836,6 +2836,8 @@ B. 纯线上互动：这是一个完全虚拟的线上聊天。你扮演的角�
         db.magicRoom.sysNotifCustomServer = sysnotifCustomSrv ? sysnotifCustomSrv.checked : false;
         db.magicRoom.sysNotifServerUrl    = sysnotifSrvUrl ? sysnotifSrvUrl.value.trim() : '';
         db.magicRoom.sysNotifServerKey    = sysnotifSrvKey ? sysnotifSrvKey.value.trim() : '';
+        const messageAlertMode = document.getElementById('message-alert-mode');
+        db.magicRoom.messageAlertMode = messageAlertMode ? messageAlertMode.value : 'system';
         await saveData();
         showToast('魔法屋设置已保存！');
     });
@@ -2865,9 +2867,15 @@ B. 纯线上互动：这是一个完全虚拟的线上聊天。你扮演的角�
         sysnotifSrvOptions.style.display    = mr.sysNotifCustomServer ? 'block' : 'none';
         sysnotifSrvUrl.value                = mr.sysNotifServerUrl || '';
         sysnotifSrvKey.value                = mr.sysNotifServerKey || '';
+        const messageAlertMode = document.getElementById('message-alert-mode');
+        if (messageAlertMode) messageAlertMode.value = mr.messageAlertMode || 'system';
 
         // 更新权限状态提示
         function updateSysNotifPermStatus() {
+            if (typeof getSystemNotificationSupportText === 'function') {
+                sysnotifPermStatus.textContent = getSystemNotificationSupportText();
+                return;
+            }
             if (!('Notification' in window)) {
                 sysnotifPermStatus.textContent = '⚠️ 当前浏览器不支持通知 API';
                 return;
@@ -2921,11 +2929,12 @@ B. 纯线上互动：这是一个完全虚拟的线上聊天。你扮演的角�
                     return;
                 }
                 const name = sysnotifSenderName.value.trim() || '章鱼喷墨机';
-                await showSystemNotification({
+                try { await showSystemNotification({
                     title: name,
                     body: '这是一条系统级通知的测试消息，如果你看到了它，说明设置成功！',
-                    icon: 'https://i.postimg.cc/Vk042Snv/5F3BCD91056B989330AE34D11901BD6E.png'
-                });
+                    icon: 'https://i.postimg.cc/Vk042Snv/5F3BCD91056B989330AE34D11901BD6E.png',
+                    target: typeof currentChatId !== 'undefined' && currentChatId ? {chatId:currentChatId,chatType:currentChatType} : undefined
+                }); } catch (error) { showToast('测试通知失败：' + error.message); }
             });
         }
     }

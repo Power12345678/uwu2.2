@@ -16,7 +16,7 @@ self.addEventListener('fetch', (event) => {
 // 接收来自页面的消息，直接显示系统通知（无需服务器，应用在前/后台时使用）
 self.addEventListener('message', (event) => {
     if (event.data && event.data.type === 'SHOW_NOTIFICATION') {
-        const { title, body, icon, badge, tag } = event.data.payload;
+        const { title, body, icon, badge, tag, data } = event.data.payload;
         event.waitUntil(
             self.registration.showNotification(title, {
                 body: body || '',
@@ -24,7 +24,8 @@ self.addEventListener('message', (event) => {
                 badge: badge || undefined,
                 tag: tag || 'ovo-message',
                 renotify: true,
-                vibrate: [200, 100, 200],
+                vibrate: [35, 40, 35],
+                data: data || {},
             })
         );
     }
@@ -46,7 +47,8 @@ self.addEventListener('push', (event) => {
             badge: data.badge || undefined,
             tag: 'ovo-push',
             renotify: true,
-            vibrate: [200, 100, 200],
+            vibrate: [35, 40, 35],
+            data: data.data || {},
         })
     );
 });
@@ -56,10 +58,22 @@ self.addEventListener('notificationclick', (event) => {
     event.notification.close();
     event.waitUntil(
         clients.matchAll({ type: 'window', includeUncontrolled: true }).then((clientList) => {
+            const scope = new URL(self.registration.scope);
+            clientList = clientList.filter(client => {
+                const url = new URL(client.url);
+                return url.origin === scope.origin && url.pathname.startsWith(scope.pathname);
+            });
+            const data = event.notification.data || {};
+            const targetUrl = data.chatId
+                ? `./?uwuChat=${encodeURIComponent(data.chatId)}&uwuChatType=${encodeURIComponent(data.chatType || 'private')}`
+                : './';
             for (const client of clientList) {
-                if ('focus' in client) return client.focus();
+                if ('focus' in client) {
+                    if (data.chatId && 'postMessage' in client) client.postMessage({ type: 'OPEN_UWU_CHAT', target: data });
+                    return client.focus();
+                }
             }
-            if (clients.openWindow) return clients.openWindow('./');
+            if (clients.openWindow) return clients.openWindow(targetUrl);
         })
     );
 });

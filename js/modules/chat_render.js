@@ -1607,12 +1607,12 @@ window.sendPayResponse = async function(msgId, action) {
 
 function addMessageBubble(message, targetChatId, targetChatType) {
     const isChatRoomActive = document.getElementById('chat-room-screen') && document.getElementById('chat-room-screen').classList.contains('active');
-    if (targetChatId !== currentChatId || targetChatType !== currentChatType || !isChatRoomActive) {
+    if (document.hidden || targetChatId !== currentChatId || targetChatType !== currentChatType || !isChatRoomActive) {
         const senderChat = (targetChatType === 'private')
             ? db.characters.find(c => c.id === targetChatId)
             : db.groups.find(g => g.id === targetChatId);
         
-        if (senderChat) {
+        if (senderChat && (message.role === 'assistant' || message.role === 'char') && !message.isThinking && !message.isContextDisabled) {
             let invisibleRegex;
             if (senderChat.showStatusUpdateMsg) {
                 // 在末尾添加 |<thinking>[\s\S]*?<\/thinking>
@@ -1623,9 +1623,10 @@ function addMessageBubble(message, targetChatId, targetChatType) {
             }
             if (!invisibleRegex.test(message.content)) {
                 senderChat.unreadCount = (senderChat.unreadCount || 0) + 1;
-                saveData(); 
+                (targetChatType === 'group' ? saveGroup(targetChatId) : saveCharacter(targetChatId));
                 renderChatList(); 
             }
+            if (invisibleRegex.test(message.content)) return;
             
             let senderName, senderAvatar;
             if (targetChatType === 'private') {
@@ -1661,21 +1662,23 @@ function addMessageBubble(message, targetChatId, targetChatType) {
             
             // === 后台消息弹窗通知开关检查 ===
             const isToastEnabled = senderChat.bgToastEnabled !== undefined ? senderChat.bgToastEnabled : (db.globalToastEnabled !== false);
-            if (isToastEnabled) {
+            if (isToastEnabled && !document.hidden) {
                 showToast({
                     avatar: senderAvatar,
                     name: senderName,
-                    message: previewText.substring(0, 30)
+                    message: previewText.substring(0, 30),
+                    target: {chatId: targetChatId, chatType: targetChatType}
                 });
             }
 
             // === 系统级通知（魔法屋设置） ===
             const mr = db.magicRoom || {};
-            if (mr.sysNotifEnabled && typeof showSystemNotification === 'function') {
+            if (document.hidden && mr.sysNotifEnabled && typeof showSystemNotification === 'function') {
                 const notifTitle = (mr.sysNotifSenderName && mr.sysNotifSenderName.trim()) ? mr.sysNotifSenderName.trim() : senderName;
                 const notifBody  = mr.sysNotifShowContent !== false ? previewText.substring(0, 60) : '你有一条新消息';
                 const notifIcon  = mr.sysNotifShowAvatar !== false ? senderAvatar : undefined;
-                showSystemNotification({ title: notifTitle, body: notifBody, icon: notifIcon });
+                showSystemNotification({ title: notifTitle, body: notifBody, icon: notifIcon,
+                    target: {chatId: targetChatId, chatType: targetChatType} }).catch(error => console.warn('[uwu] message notification failed', error));
                 // 如果用户配置了自定义推送服务器，额外发送一次
                 if (mr.sysNotifCustomServer && mr.sysNotifServerUrl) {
                     fetch(mr.sysNotifServerUrl, {

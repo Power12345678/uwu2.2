@@ -3,9 +3,13 @@
 
 async function saveCurrentChat() {
     if (currentChatType === 'group') {
-        await saveGroup(currentChatId);
+        const chat = db.groups.find(g => g.id === currentChatId);
+        const short = getShortMemoryRecordSync('group', currentChatId);
+        await persistChatWithShortMemory(chat, 'group', short && short.useShadowContext ? short : null);
     } else {
-        await saveCharacter(currentChatId);
+        const chat = db.characters.find(c => c.id === currentChatId);
+        const short = getShortMemoryRecordSync('private', currentChatId);
+        await persistChatWithShortMemory(chat, 'private', short && short.useShadowContext ? short : null);
     }
 }
 
@@ -298,7 +302,8 @@ function setupChatRoom() {
     messageInput.addEventListener('keydown', async (e) => {
         if (e.key !== 'Enter' || e.shiftKey || e.isComposing || e.keyCode === 229) return;
         e.preventDefault();
-        if (!isGenerating) await sendMessageAndGetReply();
+        if (isGenerating) return;
+        await sendMessageAndGetReply();
     });
 
     // 监听输入框聚焦事件：自动收起底部面板，避免与键盘冲突
@@ -634,9 +639,7 @@ function openChatRoom(chatId, type) {
     }
     getReplyBtn.style.display = 'inline-flex';
     chatRoomScreen.style.backgroundImage = chat.chatBg ? `url(${chat.chatBg})` : (db.globalChatWallpaper ? `url(${db.globalChatWallpaper})` : 'none');
-    typingIndicator.style.display = 'none';
-    isGenerating = false;
-    getReplyBtn.disabled = false;
+    if (typeof syncChatReplyControls === 'function') syncChatReplyControls();
     currentPage = 1;
     chatRoomScreen.className = chatRoomScreen.className.replace(/\bchat-active-[^ ]+\b/g, '');
     chatRoomScreen.classList.add(`chat-active-${chatId}`);
@@ -743,12 +746,14 @@ function openChatRoom(chatId, type) {
 }
 
 async function sendMessage() {
+    const targetChatId = currentChatId;
+    const targetChatType = currentChatType;
     const text = messageInput.value.trim();
-    if (!text || isGenerating) return false;
-    messageInput.value = '';
+    if (!text || activeChatReplyRequests.has(`${targetChatType}:${targetChatId}`)) return false;
     const chat = (currentChatType === 'private') ? db.characters.find(c => c.id === currentChatId) : db.groups.find(g => g.id === currentChatId);
 
     if (!chat) return false;
+    messageInput.value = '';
     if (!chat.history) chat.history = [];
 
     if (db.apiSettings && db.apiSettings.timePerceptionEnabled) {
@@ -831,7 +836,21 @@ async function sendMessage() {
         promptForBackupIfNeeded('history_milestone');
     }
 
-    await saveCurrentChat();
+    let shortRecord = getShortMemoryRecordSync(targetChatType, targetChatId);
+    if (shortRecord && shortRecord.useShadowContext) {
+        const userItem = getLatestUserShortMemoryItemFromHistory(chat, null, targetChatType);
+        if (userItem) {
+            const items = normalizeShortMemoryItems(shortRecord.items);
+            if (items.length && items[items.length - 1].role === 'user') items.pop();
+            shortRecord.items = items.concat([userItem]);
+        }
+    } else { shortRecord = null; }
+    try {
+        await persistChatWithShortMemory(chat, targetChatType, shortRecord);
+    } catch (error) {
+        showApiError(error);
+        return false;
+    }
     renderChatList();
 
     if (currentQuoteInfo) {

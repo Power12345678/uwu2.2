@@ -352,6 +352,18 @@ function processToastQueue() {
 
     const isRichNotification = typeof notification === 'object' && notification !== null && notification.name;
     const isMutedSimple = typeof notification === 'object' && notification !== null && notification.muted && notification.text != null;
+    const clickable = isRichNotification && notification.target;
+    toastElement.onclick = clickable ? () => {
+        if (typeof openNotificationChat === 'function') openNotificationChat(notification.target);
+        toastElement.classList.remove('show');
+    } : null;
+    toastElement.onkeydown = clickable ? event => {
+        if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); toastElement.click(); }
+    } : null;
+    toastElement.style.pointerEvents = clickable ? 'auto' : '';
+    toastElement.style.cursor = clickable ? 'pointer' : '';
+    if (clickable) { toastElement.setAttribute('role', 'button'); toastElement.tabIndex = 0; }
+    else { toastElement.removeAttribute('role'); toastElement.removeAttribute('tabindex'); }
 
     if (isRichNotification) {
         toastElement.classList.remove('simple', 'toast-muted');
@@ -392,22 +404,24 @@ const showToast = (notification) => {
     processToastQueue();
 };
 
-// 系统级通知（通过 Service Worker postMessage 触发，无需服务器，应用前/后台均有效）
-async function showSystemNotification({ title, body, icon }) {
-    if (!('Notification' in window)) return;
-    if (Notification.permission !== 'granted') return;
-    if (!navigator.serviceWorker) return;
+// This is a local notification: the page must still be running to create it.
+async function showSystemNotification({ title, body, icon, target, tag }) {
+    if (!('Notification' in window) || Notification.permission !== 'granted' || !navigator.serviceWorker) return false;
 
     try {
-        const reg = await navigator.serviceWorker.ready;
-        if (reg && reg.active) {
-            reg.active.postMessage({
-                type: 'SHOW_NOTIFICATION',
-                payload: { title, body: body || '', icon: icon || undefined, tag: 'ovo-message' }
-            });
-        }
+        const reg = await navigator.serviceWorker.getRegistration();
+        if (!reg || !reg.active) throw new Error('通知服务尚未就绪，请刷新后再试');
+        const silent = typeof getMessageAlertMode === 'function' && getMessageAlertMode() === 'silent';
+        await reg.showNotification(title, {
+            body: body || '', icon: icon || undefined,
+            tag: tag || (target ? `uwu:${target.chatType}:${target.chatId}` : 'uwu-message'),
+            silent, ...(silent ? {} : {vibrate:[35,40,35]}),
+            data: {chatId: target && target.chatId, chatType: target && target.chatType},
+        });
+        return true;
     } catch (e) {
         console.warn('showSystemNotification error:', e);
+        throw e;
     }
 }
 window.showSystemNotification = showSystemNotification;
@@ -467,8 +481,8 @@ function getFriendlyErrorMessage(error) {
         }
     }
 
-    if (error instanceof TypeError && error.message.includes('Failed to fetch')) {
-        return '无法连接到服务器，请检查您的网络连接或API地址是否正确。';
+    if (error instanceof TypeError && /failed to fetch|load failed|networkerror/i.test(error.message)) {
+        return '网络请求中断（iOS 切到后台、网络切换、跨域限制或 API 连接失败都可能导致）。已保存的聊天不会删除，请回到前台检查网络。';
     }
 
     return `发生了一个未知错误：${error.message}`;
@@ -1065,6 +1079,7 @@ function isApiAbortError(error) {
 }
 
 function shouldRetryApiError(error) {
+    if (error && error.name === 'ChatPersistenceError') return false;
     if (isApiAbortError(error)) return false;
     if (error && error.isEmptyAiResponse) return true;
 
