@@ -240,3 +240,34 @@ test('two overlapping sends from one chat commit only one user message', async (
   assert.equal(writes, 1);
   assert.equal(chat.history.filter(message=>message.role === 'user').length, 1);
 });
+
+test('a rejected user-message write cannot apply a payment action to an existing request', async () => {
+  const request={id:'pay',role:'assistant',content:'[司洛发起了代付请求：书]'};
+  const chat={id:'c1',realName:'司洛',myName:'朱迅',history:[request]};
+  const state={console,window:{},currentChatId:'c1',currentChatType:'private',currentQuoteInfo:null,
+    messageInput:{value:'[朱迅同意了司洛的代付请求]'},messageArea:{querySelector:()=>null},
+    document:{hidden:false,getElementById:()=>({classList:{contains:()=>true}})},
+    db:{characters:[chat],groups:[],apiSettings:{}},activeChatReplyRequests:new Map(),
+    renderChatList(){},renderMessages(){},triggerHapticFeedback(){},showApiError(){},
+    getShortMemoryRecordSync:()=>null,persistChatWithShortMemory:async()=>{throw new Error('disk busy');}};
+  vm.createContext(state);
+  vm.runInContext(source('modules/chat_render.js'),state);
+  state.renderMessages=()=>{};
+  vm.runInContext(source('chat.js'),state);
+  assert.equal(await state.sendMessage(),false);
+  assert.equal(request.payStatus,undefined);
+});
+
+test('a model request waiting for old storage must recheck a newly started user send', async () => {
+  let calls=0;
+  const state=apiHarness(async()=>{calls++;return {ok:true,json:async()=>({choices:[{message:{content:'answer'}}]})};});
+  state.activeChatMessageSends=new Set();
+  state.hasPendingChatPersistence=()=>true;
+  let release;
+  state.retryPendingChatPersistence=async()=>new Promise(resolve=>{release=resolve;});
+  state.handleAiReplyContent=async()=>{};
+  const waiting=state.getAiReply('c1','private');
+  state.activeChatMessageSends.add('private:c1');
+  release(); await waiting;
+  assert.equal(calls,0);
+});

@@ -299,12 +299,7 @@ function setupChatRoom() {
             messageInput.focus();
         }, 50);
     });
-    messageInput.addEventListener('keydown', async (e) => {
-        if (e.key !== 'Enter' || e.shiftKey || e.isComposing || e.keyCode === 229) return;
-        e.preventDefault();
-        if (isGenerating) return;
-        await sendMessageAndGetReply();
-    });
+    setupChatComposerKeyboard(messageInput);
 
     // 监听输入框聚焦事件：自动收起底部面板，避免与键盘冲突
     messageInput.addEventListener('focus', () => {
@@ -747,6 +742,45 @@ function openChatRoom(chatId, type) {
 
 const activeChatMessageSends = new Set();
 
+function setupChatComposerKeyboard(input) {
+    let composing = false;
+    let lastCompositionEnd = 0;
+    const pendingSubmissions = new Set();
+    let suppressBeforeInput = false;
+    const submit = event => {
+        if (event.cancelable) event.preventDefault();
+        const key = `${currentChatType}:${currentChatId}`;
+        if (pendingSubmissions.has(key) || isGenerating) return;
+        pendingSubmissions.add(key);
+        return Promise.resolve(sendMessageAndGetReply())
+            .catch(error => showApiError(error))
+            .finally(() => { pendingSubmissions.delete(key); });
+    };
+
+    input.addEventListener('compositionstart', () => { composing = true; });
+    input.addEventListener('compositionend', () => {
+        composing = false;
+        suppressBeforeInput = false;
+        lastCompositionEnd = Date.now();
+    });
+    input.addEventListener('keydown', event => {
+        if (event.key !== 'Enter') return;
+        suppressBeforeInput = !!(event.shiftKey || event.repeat || composing || event.isComposing || event.keyCode === 229 || Date.now() - lastCompositionEnd < 80);
+        if (suppressBeforeInput) return;
+        return submit(event);
+    });
+    input.addEventListener('keyup', () => { suppressBeforeInput = false; });
+    input.addEventListener('beforeinput', event => {
+        if (!['insertLineBreak', 'insertParagraph'].includes(event.inputType)) return;
+        if (suppressBeforeInput) return;
+        if (composing || event.isComposing || Date.now() - lastCompositionEnd < 80) {
+            if (event.cancelable) event.preventDefault();
+            return;
+        }
+        return submit(event);
+    });
+}
+
 async function sendMessage() {
     const key = `${currentChatType}:${currentChatId}`;
     if (activeChatMessageSends.has(key)) return false;
@@ -771,9 +805,11 @@ async function commitUserChatMessage() {
         catch (error) { showApiError(error); return false; }
     }
     if (currentChatId !== targetChatId || currentChatType !== targetChatType) return false;
+    if (activeChatReplyRequests.has(`${targetChatType}:${targetChatId}`)) return false;
     if (!chat.history) chat.history = [];
-    const originalHistoryLength = chat.history.length;
+    const originalChatName = chat.name;
     const originalLastUserMessageTimestamp = chat.lastUserMessageTimestamp;
+    const userBubbles = [];
 
     if (db.apiSettings && db.apiSettings.timePerceptionEnabled) {
         const now = new Date();
@@ -797,7 +833,7 @@ async function commitUserChatMessage() {
                 }
 
                 chat.history.push(visualMessage);
-                addMessageBubble(visualMessage, currentChatId, currentChatType);
+                userBubbles.push(visualMessage);
             }
         }
         chat.lastUserMessageTimestamp = now.getTime();
@@ -810,10 +846,9 @@ async function commitUserChatMessage() {
     const shopOrderRegex = /\[.*?为你下单的商品：.*?\]/;
     const myName = (currentChatType === 'private') ? chat.myName : chat.me.nickname;
 
-    if (renameRegex.test(text)) {
+    if (targetChatType === 'group' && renameRegex.test(text)) {
         const match = text.match(renameRegex);
         chat.name = match[2];
-        chatRoomTitle.textContent = chat.name;
         messageContent = `[${chat.me.nickname}修改群名为“${chat.name}”]`;
     } else if (systemRegex.test(text) || inviteRegex.test(text) || shopOrderRegex.test(text)) {
         messageContent = text;
@@ -845,11 +880,7 @@ async function commitUserChatMessage() {
         message.sentWhileBlocked = true;
     }
     chat.history.push(message);
-    addMessageBubble(message, currentChatId, currentChatType);
-    if (db.globalMessageSentSound && typeof playSound === 'function') {
-        playSound(db.globalMessageSentSound);
-    }
-    triggerHapticFeedback('success');
+    userBubbles.push(message);
 
     if (chat.history.length > 0 && chat.history.length % 300 === 0) {
         promptForBackupIfNeeded('history_milestone');
@@ -867,7 +898,8 @@ async function commitUserChatMessage() {
     try {
         await persistChatWithShortMemory(chat, targetChatType, shortRecord);
     } catch (error) {
-        chat.history.splice(originalHistoryLength);
+        chat.history = chat.history.filter(item => !userBubbles.includes(item));
+        chat.name = originalChatName;
         chat.lastUserMessageTimestamp = originalLastUserMessageTimestamp;
         if (typeof discardFailedUserMessageSave === 'function') discardFailedUserMessageSave(chat, targetChatType);
         if (currentChatId === targetChatId && currentChatType === targetChatType && typeof renderMessages === 'function') renderMessages(false, false);
@@ -875,6 +907,16 @@ async function commitUserChatMessage() {
         return false;
     }
     if (currentChatId === targetChatId && currentChatType === targetChatType && messageInput.value.trim() === text) messageInput.value = '';
+    // Apply commands only after their user message commits. A failed initial
+    // write must not mark a payment as paid or change an existing card state.
+    for (const bubble of userBubbles) addMessageBubble(bubble, targetChatId, targetChatType);
+    if (currentChatId === targetChatId && currentChatType === targetChatType && targetChatType === 'group') chatRoomTitle.textContent = chat.name;
+    if (/(更新状态为|代付请求|亲属卡|修改群名|邀请)/.test(text)) {
+        try { await persistChatWithShortMemory(chat, targetChatType); }
+        catch (error) { showApiError(error); }
+    }
+    if (db.globalMessageSentSound && typeof playSound === 'function') playSound(db.globalMessageSentSound);
+    triggerHapticFeedback('success');
     renderChatList();
 
     if (currentChatId === targetChatId && currentChatType === targetChatType && currentQuoteInfo) {

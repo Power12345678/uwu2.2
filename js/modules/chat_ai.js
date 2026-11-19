@@ -327,6 +327,7 @@ async function getAiReply(chatId, chatType, isBackground = false, isSummary = fa
         try { await retryPendingChatPersistence(); }
         catch (error) { showApiError(error); return; }
         if (activeChatReplyRequests.has(requestKey)) return;
+        if (typeof activeChatMessageSends !== 'undefined' && activeChatMessageSends.has(requestKey)) return;
     }
     const requestController = new AbortController();
     activeChatReplyRequests.set(requestKey, { controller: requestController, name: chat.remarkName || chat.name || chat.realName || '对方' });
