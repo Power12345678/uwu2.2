@@ -225,18 +225,10 @@ function isShortMemoryAssistantMessage(message) {
 }
 
 function isShortMemoryAssistantReplyCountable(text) {
-    const raw = String(text || '').trim();
-    if (!raw) return false;
-    const normalized = raw.toLowerCase().replace(/\s+/g, '');
-    const invalidMarkers = [
-        '抱歉，我现在有点忙',
-        '抱歉,我现在有点忙',
-        '稍后再聊',
-        '请稍后再试',
-        '服务繁忙',
-        '系统繁忙'
-    ];
-    return !invalidMarkers.some(marker => normalized.includes(marker.toLowerCase().replace(/\s+/g, '')));
+    // API/network failures are thrown before a reply is added to history.
+    // Natural dialogue such as “稍后再聊” is still a real received reply;
+    // content keywords must never silently erase its whole conversation turn.
+    return String(text || '').trim().length > 0;
 }
 
 function buildShortMemoryItemsFromHistory(chat, chatType) {
@@ -251,6 +243,10 @@ function buildShortMemoryItemsFromHistory(chat, chatType) {
         if (userText && assistantText && isShortMemoryAssistantReplyCountable(assistantText)) {
             items.push({ role: 'user', content: userText, timestamp: lastTimestamp });
             items.push({ role: 'assistant', content: assistantText, timestamp: lastTimestamp + 1 });
+        } else if (userText && !assistantText) {
+            // Keep a manually sent message while its reply is pending. The
+            // separate round builder still counts only completed user/AI pairs.
+            items.push({ role: 'user', content: userText, timestamp: lastTimestamp });
         }
         pendingUserTexts = [];
         pendingAssistantTexts = [];
@@ -482,6 +478,14 @@ async function retryPendingChatPersistence() {
 
 function hasPendingChatPersistence(chatType, chatId) {
     return pendingChatPersistence.has(getShortMemoryChatKey(chatType, chatId));
+}
+
+function discardFailedUserMessageSave(chat, chatType) {
+    const key = getShortMemoryChatKey(chatType, chat.id);
+    // User sends retain their draft on failure and roll back their history.
+    // Received AI replies instead stay in this queue for storage-only retry.
+    const entry = pendingChatPersistence.get(key);
+    if (entry && entry.chat === chat) pendingChatPersistence.delete(key);
 }
 
 function splitWechatMessageParts(text, options = {}) {

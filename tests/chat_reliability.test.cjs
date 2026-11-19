@@ -183,3 +183,60 @@ test('theme change storage failure preserves all following reply bubbles for loc
   assert.deepEqual(pendingChat.history.map(m => m.content), ['[司洛的消息：first]', '[司洛的消息：last]']);
   assert.deepEqual(shown, ['[司洛的消息：first]', '[司洛的消息：last]']);
 });
+
+test('normal dialogue mentioning later chatting is kept in both history and shadow short context', async () => {
+  const {state,chat} = shortHarness();
+  chat.history[1].content = '我先去上课，稍后再聊，晚上陪你看电影。';
+  assert.equal(state.buildShortMemoryItemsFromHistory(chat, 'private').length, 2);
+  await state.appendShortMemoryTurnFromHistoryDiff('private','c1',chat,1);
+  assert.equal(state.getShortMemoryRecordSync('private','c1').items.at(-1).content, '我先去上课，稍后再聊，晚上陪你看电影。');
+});
+
+test('a manually sent pending user is visible in short context without counting as a completed round', () => {
+  const {state,chat} = shortHarness();
+  chat.history.push({id:'u3',role:'user',content:'下一句',timestamp:3000});
+  const items = state.buildShortMemoryItemsFromHistory(chat,'private');
+  assert.deepEqual(clone(items.map(i=>i.role)), ['user','assistant','user']);
+  assert.equal(state.shortMemoryItemsToRounds(items).length, 1);
+});
+
+test('a failed user-message save keeps the draft and removes the uncommitted history item', async () => {
+  const state = {
+    console, window:{}, currentChatId:'c1', currentChatType:'private',
+    messageInput:{value:'hello'}, currentQuoteInfo:null,
+    db:{characters:[{id:'c1',myName:'User',history:[{id:'prior',role:'assistant',content:'saved'}]}],groups:[],apiSettings:{}},
+    activeChatReplyRequests:new Map(), addMessageBubble(){}, renderChatList(){}, renderMessages(){},
+    triggerHapticFeedback(){}, showApiError(){},
+    getShortMemoryRecordSync:()=>null,
+    persistChatWithShortMemory:async()=>{throw new Error('disk busy');},
+    chatRoomTitle:{textContent:''}, formatTimeGap:()=>'',
+  };
+  vm.createContext(state);
+  vm.runInContext(source('chat.js'), state);
+  const sent = await state.sendMessage();
+  assert.equal(sent, false);
+  assert.equal(state.messageInput.value, 'hello');
+  assert.equal(state.db.characters[0].history.length, 1);
+});
+
+test('two overlapping sends from one chat commit only one user message', async () => {
+  const chat = {id:'c1',myName:'User',history:[]};
+  let writes = 0;
+  const releaseWrites = [];
+  const state = {
+    console, window:{}, currentChatId:'c1', currentChatType:'private',
+    messageInput:{value:'hello'}, currentQuoteInfo:null,
+    db:{characters:[chat],groups:[],apiSettings:{}},
+    activeChatReplyRequests:new Map(), addMessageBubble(){}, renderChatList(){}, renderMessages(){},
+    triggerHapticFeedback(){}, showApiError(){}, getShortMemoryRecordSync:()=>null,
+    persistChatWithShortMemory:async()=>{ writes++; await new Promise(resolve=>{releaseWrites.push(resolve);}); },
+  };
+  vm.createContext(state);
+  vm.runInContext(source('chat.js'), state);
+  const first = state.sendMessage();
+  const second = state.sendMessage();
+  releaseWrites.forEach(release=>release());
+  await Promise.all([first,second]);
+  assert.equal(writes, 1);
+  assert.equal(chat.history.filter(message=>message.role === 'user').length, 1);
+});

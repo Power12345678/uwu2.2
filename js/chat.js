@@ -745,7 +745,20 @@ function openChatRoom(chatId, type) {
     });
 }
 
+const activeChatMessageSends = new Set();
+
 async function sendMessage() {
+    const key = `${currentChatType}:${currentChatId}`;
+    if (activeChatMessageSends.has(key)) return false;
+    activeChatMessageSends.add(key);
+    try {
+        return await commitUserChatMessage();
+    } finally {
+        activeChatMessageSends.delete(key);
+    }
+}
+
+async function commitUserChatMessage() {
     const targetChatId = currentChatId;
     const targetChatType = currentChatType;
     const text = messageInput.value.trim();
@@ -753,8 +766,14 @@ async function sendMessage() {
     const chat = (currentChatType === 'private') ? db.characters.find(c => c.id === currentChatId) : db.groups.find(g => g.id === currentChatId);
 
     if (!chat) return false;
-    messageInput.value = '';
+    if (typeof hasPendingChatPersistence === 'function' && hasPendingChatPersistence(targetChatType, targetChatId)) {
+        try { await retryPendingChatPersistence(); }
+        catch (error) { showApiError(error); return false; }
+    }
+    if (currentChatId !== targetChatId || currentChatType !== targetChatType) return false;
     if (!chat.history) chat.history = [];
+    const originalHistoryLength = chat.history.length;
+    const originalLastUserMessageTimestamp = chat.lastUserMessageTimestamp;
 
     if (db.apiSettings && db.apiSettings.timePerceptionEnabled) {
         const now = new Date();
@@ -848,12 +867,17 @@ async function sendMessage() {
     try {
         await persistChatWithShortMemory(chat, targetChatType, shortRecord);
     } catch (error) {
+        chat.history.splice(originalHistoryLength);
+        chat.lastUserMessageTimestamp = originalLastUserMessageTimestamp;
+        if (typeof discardFailedUserMessageSave === 'function') discardFailedUserMessageSave(chat, targetChatType);
+        if (currentChatId === targetChatId && currentChatType === targetChatType && typeof renderMessages === 'function') renderMessages(false, false);
         showApiError(error);
         return false;
     }
+    if (currentChatId === targetChatId && currentChatType === targetChatType && messageInput.value.trim() === text) messageInput.value = '';
     renderChatList();
 
-    if (currentQuoteInfo) {
+    if (currentChatId === targetChatId && currentChatType === targetChatType && currentQuoteInfo) {
         cancelQuoteReply();
     }
     return true;

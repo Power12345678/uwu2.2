@@ -265,6 +265,7 @@ function syncChatReplyControls() {
 async function getAiReply(chatId, chatType, isBackground = false, isSummary = false, isCharBlockedMonologue = false, isPhoneControlRevokeAttempt = false) {
     const requestKey = `${chatType}:${chatId}`;
     if (activeChatReplyRequests.has(requestKey)) return;
+    if (typeof activeChatMessageSends !== 'undefined' && activeChatMessageSends.has(requestKey)) return;
 
     // 拉黑检查：被拉黑的角色不回复（角色拉黑用户后的「让TA说说」不在此列）
     if (chatType === 'private' && !isCharBlockedMonologue) {
