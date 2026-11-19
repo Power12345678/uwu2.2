@@ -110,3 +110,76 @@ test('short context append is idempotent for the same assistant message', async 
   await state.appendShortMemoryTurnFromHistoryDiff('private', 'c1', chat, 1);
   assert.equal(state.getShortMemoryRecordSync('private','c1').items.length, 4);
 });
+
+test('saving again after a failed reply write preserves the received short-context turn', async () => {
+  const { state, chat } = shortHarness();
+  let fail = true;
+  let storedRecord;
+  state.dexieDB.characters = {put: async () => { if (fail) throw new Error('disk busy'); }};
+  state.dexieDB.shortMemoryContexts.put = async record => { storedRecord = clone(record); };
+  state.dexieDB.transaction = async (_mode, ...tablesAndCallback) => tablesAndCallback.at(-1)();
+  const received = state.buildShortMemoryTurnFromHistoryDiff('private', 'c1', chat, 1);
+  await assert.rejects(state.persistChatWithShortMemory(chat, 'private', received));
+  fail = false;
+  // This is the same read/save sequence used by saveCurrentChat().
+  await state.persistChatWithShortMemory(chat, 'private', state.getShortMemoryRecordSync('private', 'c1'));
+  assert.deepEqual(storedRecord.items.map(i => i.content), ['嗯', '第一次回答', '嗯', '第二次回答']);
+  assert.equal(state.hasPendingChatPersistence('private', 'c1'), false);
+});
+
+test('an older successful write cannot clear a newer failed pending reply', async () => {
+  const { state, chat } = shortHarness();
+  let finishOld;
+  let calls = 0;
+  state.dexieDB.characters = {put: async () => {}};
+  state.dexieDB.transaction = async (_mode, ...tablesAndCallback) => {
+    calls++;
+    if (calls === 1) await new Promise(resolve => { finishOld = resolve; });
+    else throw new Error('disk busy');
+    await tablesAndCallback.at(-1)();
+  };
+  const original = state.getShortMemoryRecordSync('private', 'c1');
+  const oldSave = state.persistChatWithShortMemory(chat, 'private', original);
+  const newer = {...original, items: [...original.items, {role:'user',content:'new user'}, {role:'assistant',content:'new reply'}]};
+  await assert.rejects(state.persistChatWithShortMemory(chat, 'private', newer));
+  finishOld();
+  await oldSave;
+  assert.equal(state.hasPendingChatPersistence('private', 'c1'), true);
+  assert.equal(state.getShortMemoryRecordSync('private', 'c1').items.at(-1).content, 'new reply');
+});
+
+test('accepted gift status survives a save/reload after the reply', async () => {
+  const state = apiHarness(async () => {});
+  const chat = state.db.characters[0];
+  Object.assign(chat, { realName:'司洛', myName:'朱迅', history:[
+    {id:'gift',role:'user',content:'[朱迅送来的礼物：书]',giftStatus:'pending'},
+    {id:'accepted',role:'assistant',content:'[司洛已接收礼物]'},
+  ] });
+  state.document.getElementById = () => ({classList:{contains:()=>true}});
+  state.messageArea.querySelector = () => null;
+  let storedChat;
+  state.persistChatWithShortMemory = async record => { storedChat = clone(record); };
+  state.renderChatList = () => {};
+  vm.runInContext(source('modules/chat_render.js'), state);
+  await state.persistReplyAndRenderedSideEffects(chat, 'c1', 'private', null, [[chat.history[1], 'c1', 'private']]);
+  assert.equal(storedChat.history[0].giftStatus, 'received');
+});
+
+test('theme change storage failure preserves all following reply bubbles for local retry', async () => {
+  const state = apiHarness(async () => {});
+  const chat = state.db.characters[0];
+  Object.assign(chat, {realName:'司洛',myName:'朱迅',allowCharSwitchBubbleCss:true,bubbleCssThemeBindings:[{presetName:'dark'}]});
+  state.db.bubbleCssPresets = [{name:'dark',css:'test'}];
+  state.executePhoneControlCommands = () => ({executed:false});
+  state.getMixedContent = text => text.split('|').map(content => ({type:'text',content}));
+  state.renderChatList = () => {};
+  state.saveCurrentChat = () => {};
+  const shown = [];
+  state.addMessageBubble = message => shown.push(message.content);
+  let pendingChat;
+  state.persistChatWithShortMemory = async record => { pendingChat = clone(record); throw new Error('disk busy'); };
+  state.buildShortMemoryTurnFromHistoryDiff = () => null;
+  await assert.rejects(state.handleAiReplyContent('[司洛的消息：first]|[更换主题：dark]|[司洛的消息：last]',chat,'c1','private'));
+  assert.deepEqual(pendingChat.history.map(m => m.content), ['[司洛的消息：first]', '[司洛的消息：last]']);
+  assert.deepEqual(shown, ['[司洛的消息：first]', '[司洛的消息：last]']);
+});

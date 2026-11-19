@@ -74,6 +74,10 @@ function getShortMemoryImportModeLabel(mode) {
 
 function getShortMemoryRecordSync(chatType, chatId) {
     const chatKey = getShortMemoryChatKey(chatType, chatId);
+    // A received reply awaiting storage is newer than the committed cache.
+    // Subsequent sends/settings saves must build on it, not overwrite it.
+    const pending = pendingChatPersistence.get(chatKey);
+    if (pending && pending.shortRecord) return normalizeShortMemoryRecord(pending.shortRecord);
     const list = ensureShortMemoryDbArray();
     const record = list.find(item => item.chatKey === chatKey);
     return record ? normalizeShortMemoryRecord(record) : null;
@@ -443,7 +447,8 @@ async function persistChatWithShortMemory(chat, chatType, shortRecord = null) {
     const key = getShortMemoryChatKey(chatType, chat.id);
     const oldPending = pendingChatPersistence.get(key);
     const record = shortRecord || (oldPending && oldPending.shortRecord) || null;
-    pendingChatPersistence.set(key, { chat, chatType, shortRecord: record });
+    const pendingEntry = { chat, chatType, shortRecord: record };
+    pendingChatPersistence.set(key, pendingEntry);
     try {
         const table = chatType === 'group' ? dexieDB.groups : dexieDB.characters;
         if (!table || !dexieDB.transaction) throw new Error('本地数据库尚未就绪');
@@ -459,7 +464,8 @@ async function persistChatWithShortMemory(chat, chatType, shortRecord = null) {
             const index = list.findIndex(item => item.chatKey === key);
             if (index < 0) list.push(normalized); else list[index] = normalized;
         }
-        pendingChatPersistence.delete(key);
+        // Do not let an older in-flight save remove a newer failed save.
+        if (pendingChatPersistence.get(key) === pendingEntry) pendingChatPersistence.delete(key);
     } catch (cause) {
         const error = new Error('回复已收到，但聊天/短期上下文保存失败。请保持页面打开，检查存储空间后重试保存；不会重新请求 AI。');
         error.name = 'ChatPersistenceError';

@@ -1351,6 +1351,19 @@ function buildPrivateReplyItems(fullResponse, chat) {
     return items;
 }
 
+async function persistReplyAndRenderedSideEffects(chat, targetChatId, targetChatType, shortRecord, pendingBubbles) {
+    try {
+        await persistChatWithShortMemory(chat, targetChatType, shortRecord);
+    } catch (_) { /* render and retry the complete local save below */ }
+
+    // Apply status/gift/payment/transfer side effects after the first write,
+    // then persist those side effects too. This second write is local only;
+    // it never re-calls the model.
+    for (const args of pendingBubbles) addMessageBubble(...args);
+    renderChatList();
+    await persistChatWithShortMemory(chat, targetChatType);
+}
+
 async function handleAiReplyContent(fullResponse, chat, targetChatId, targetChatType, isBackground = false, isCharBlockedMonologue = false) {
     const rawResponse = fullResponse;
     const pendingBubbles = [];
@@ -1623,7 +1636,9 @@ async function handleAiReplyContent(fullResponse, chat, targetChatId, targetChat
                             chat.useCustomBubbleCss = true;
                             char.currentBubbleCssPresetName = preset.name;
                             if (typeof updateCustomBubbleStyle === 'function') updateCustomBubbleStyle(targetChatId, preset.css, true);
-                            if (typeof saveCurrentChat === 'function') await persistChatWithShortMemory(chat, targetChatType);
+                            // The final reply transaction saves this style change together
+                            // with the complete response. Do not interrupt reply parsing
+                            // with a second storage operation that can fail mid-response.
                             contentAfterStrip = contentAfterStrip.replace(themeSwitchMatch[0], '').replace(/\n{3,}/g, '\n\n').trim();
                         }
                     }
@@ -1928,13 +1943,7 @@ async function handleAiReplyContent(fullResponse, chat, targetChatId, targetChat
         }
 
         const shortRecord = buildShortMemoryTurnFromHistoryDiff(targetChatType, targetChatId, chat, shortMemoryHistoryStartLength);
-        try {
-            await persistChatWithShortMemory(chat, targetChatType, shortRecord);
-        } finally {
-            // Received text stays visible if storage needs a local retry.
-            for (const args of pendingBubbles) addMessageBubble(...args);
-            renderChatList();
-        }
+        await persistReplyAndRenderedSideEffects(chat, targetChatId, targetChatType, shortRecord, pendingBubbles);
 
         if (targetChatType === 'private' && (chat.source === 'forum' || chat.source === 'peek') && chat.supplementPersonaAiEnabled) {
             setTimeout(function() {
