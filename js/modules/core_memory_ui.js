@@ -254,6 +254,7 @@ function setupCoreMemoryUI() {
             bundleImportBtn.disabled = true;
             try {
                 const result = await importUwuMemorySyncBundle(file);
+                if (typeof renderMessages === 'function') renderMessages(false, false);
                 const status = document.getElementById('core-memory-sync-status');
                 if (status) status.textContent = `已导入同步包：原文新增 ${result.insertedRawMessages} 条、更新 ${result.updatedRawMessages} 条，摘要 ${result.coreMemoryCount} 条，短期上下文 ${result.shortContextCount || 0} 条`;
                 if (typeof showToast === 'function') showToast('Bot 同步包已合并到当前小手机会话');

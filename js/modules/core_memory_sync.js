@@ -195,10 +195,32 @@ function buildUwuMemorySyncBundle() {
     const rounds = buildUwuSyncSourceRounds(chat.history);
     const chatKey = typeof getCoreMemoryChatKey === 'function' ? getCoreMemoryChatKey(chatType, chatId) : `${chatType}:${chatId}`;
     const allRaw = buildUwuSyncRawMessages(rounds, 0, chatKey, {}).messages;
+    const exportedIds = new Set(allRaw.map(item => item.source_id));
+    // Preserve Bot-origin rows that do not form a user→assistant pair in the
+    // phone history.  They still have a stable source ID and must survive a
+    // Bot → uwu → Bot round trip.
+    (chat.history || []).forEach(message => {
+        const sourceId = String(message && message.memorySyncSourceId || '').trim();
+        const content = getUwuSyncMessageText(message).trim();
+        const role = String(message && message.role || '').trim().toLowerCase();
+        if (!sourceId || exportedIds.has(sourceId) || !content || !['user', 'assistant'].includes(role)) return;
+        allRaw.push({
+            source_id: sourceId,
+            role,
+            content,
+            timestamp_ms: Number(message.timestamp || 0) || 0,
+            conversation_unit_id: `uwu:${chatKey}:imported:${sourceId}`,
+        });
+        exportedIds.add(sourceId);
+    });
+    allRaw.sort((a, b) => Number(a.timestamp_ms || 0) - Number(b.timestamp_ms || 0));
     const scope = getUwuLocalSyncScope();
     const shortRecord = typeof getShortMemoryRecordSync === 'function'
         ? getShortMemoryRecordSync(chatType, chatId)
         : null;
+    const shortItems = typeof getShortMemoryItemsForChat === 'function'
+        ? getShortMemoryItemsForChat(chat, chatType).items
+        : (shortRecord && Array.isArray(shortRecord.items) ? shortRecord.items : []);
     return {
         protocol: 'uwu-memory-sync-bundle-v1',
         exported_at: new Date().toISOString(),
@@ -208,7 +230,9 @@ function buildUwuMemorySyncBundle() {
         char_id: scope.charId,
         raw_messages: allRaw,
         core_memory_items: record && Array.isArray(record.items) ? record.items : [],
-        short_context_items: shortRecord && Array.isArray(shortRecord.items) ? shortRecord.items : [],
+        short_context_items: shortItems,
+        summary_cursor_kind: 'short_context_rounds',
+        short_context_summary_cursor: Math.max(0, parseInt(record && record.lastSummarizedRound, 10) || 0),
         total_completed_rounds: rounds.length,
         last_summarized_round: Math.max(0, parseInt(record && record.lastSummarizedRound, 10) || 0),
     };
@@ -231,16 +255,42 @@ function downloadUwuMemorySyncBundle() {
     return bundle;
 }
 
-function getUwuImportedMessageKey(item) {
-    const source = String(item && (item.memorySyncSourceId || item.syncSourceId || '') || '').trim();
-    if (source) return `source:${source}`;
-    const role = String(item && item.role || '').trim().toLowerCase();
-    const content = getUwuSyncMessageText(item).trim();
-    const timestamp = Number(item && item.timestamp || 0) || 0;
-    return `content:${role}|${timestamp}|${content}`;
+function validateUwuMemorySyncBundle(bundle) {
+    if (!bundle || bundle.protocol !== 'uwu-memory-sync-bundle-v1'
+        || !Array.isArray(bundle.raw_messages) || !Array.isArray(bundle.core_memory_items)
+        || (bundle.short_context_items !== undefined && !Array.isArray(bundle.short_context_items))) {
+        throw new Error('文件不是有效的 uwu / Bot 同步包');
+    }
+    const scope = getUwuLocalSyncScope();
+    if ((bundle.user_id && bundle.user_id !== scope.userId) || (bundle.char_id && bundle.char_id !== scope.charId)) {
+        throw new Error('同步包的用户或角色与当前同步档案不一致');
+    }
+    const validMessage = item => item && ['user', 'assistant'].includes(item.role)
+        && typeof item.content === 'string' && item.content.trim();
+    const seen = new Set();
+    bundle.raw_messages.forEach(item => {
+        if (!validMessage(item) || typeof item.source_id !== 'string' || !item.source_id.trim()
+            || !Number.isSafeInteger(item.timestamp_ms) || item.timestamp_ms <= 0 || seen.has(item.source_id)) {
+            throw new Error('原文消息缺少有效内容、时间或唯一来源 ID');
+        }
+        seen.add(item.source_id);
+    });
+    bundle.core_memory_items.forEach(item => {
+        if (!item || typeof item.summary !== 'string' || !item.summary.trim()
+            || typeof item.timestamp !== 'string' || !item.timestamp.trim()
+            || !Array.isArray(item.keywords || []) || !Number.isInteger(item.importance)
+            || item.importance < 1 || item.importance > 10) {
+            throw new Error('连续性摘要格式不完整');
+        }
+    });
+    (bundle.short_context_items || []).forEach(item => {
+        if (!validMessage(item)) throw new Error('短期上下文格式不完整');
+    });
 }
 
 async function importUwuMemorySyncBundle(file) {
+    if (typeof isGenerating !== 'undefined' && isGenerating) throw new Error('请等当前回复完成后再导入同步包');
+    const target = getUwuSyncChatContext();
     if (!file) throw new Error('请选择同步包 JSON 文件');
     const text = await (typeof file.text === 'function'
         ? file.text()
@@ -251,88 +301,99 @@ async function importUwuMemorySyncBundle(file) {
             reader.readAsText(file, 'utf-8');
         }));
     let bundle;
-    try { bundle = JSON.parse(text); }
+    try { bundle = JSON.parse(text.replace(/^\uFEFF/, '')); }
     catch (_) { throw new Error('同步包不是有效 JSON'); }
-    if (!bundle || bundle.protocol !== 'uwu-memory-sync-bundle-v1'
-        || !Array.isArray(bundle.raw_messages)
-        || !Array.isArray(bundle.core_memory_items)) {
-        throw new Error('文件不是 uwu / Bot 同步包');
-    }
+    validateUwuMemorySyncBundle(bundle);
     const { chat, chatType, chatId } = getUwuSyncChatContext();
-    if (!chat || !chatId || !Array.isArray(chat.history)) throw new Error('请先打开要导入的 uwu 私聊');
-
+    if (chat !== target.chat || chatType !== target.chatType || chatId !== target.chatId) throw new Error('读取文件期间切换了聊天，请在目标私聊重新导入');
+    if (typeof isGenerating !== 'undefined' && isGenerating) throw new Error('请等当前回复完成后再导入同步包');
+    if (!chat || !chatId || chatType !== 'private' || !Array.isArray(chat.history)) throw new Error('请先打开要导入的 uwu 私聊');
+    if (typeof dexieDB === 'undefined' || !dexieDB || !dexieDB.transaction
+        || !dexieDB.characters || !dexieDB.coreMemoryFiles || !dexieDB.shortMemoryContexts) {
+        throw new Error('手机本地数据库尚未就绪，请稍后重试');
+    }
+    const copy = value => JSON.parse(JSON.stringify(value));
+    const nextChat = copy(chat);
+    const chatKey = getCoreMemoryChatKey(chatType, chatId);
     const existingByKey = new Map();
-    const existing = Array.isArray(chat.history) ? chat.history : [];
-    existing.forEach(item => existingByKey.set(getUwuImportedMessageKey(item), item));
+    nextChat.history.forEach(item => {
+        const role = item.role === 'user' ? 'user' : 'assistant';
+        const sourceId = getUwuSyncSourceId(chatKey, 0, role, item, getUwuSyncMessageText(item));
+        existingByKey.set(sourceId, item);
+    });
     let inserted = 0;
     let updated = 0;
-    (bundle.raw_messages || []).forEach(item => {
-        const role = String(item && item.role || '').trim().toLowerCase();
-        const content = String(item && item.content || '').trim();
-        if (!['user', 'assistant'].includes(role) || !content) return;
-        const sourceId = String(item.source_id || '').trim();
-        const timestamp = Number(item.timestamp_ms || item.timestamp || 0) || Date.now();
-        const key = sourceId ? `source:${sourceId}` : `content:${role}|${timestamp}|${content}`;
-        const old = existingByKey.get(key);
+    bundle.raw_messages.forEach(item => {
+        const { role, content, source_id: sourceId, timestamp_ms: timestamp } = item;
+        const old = existingByKey.get(sourceId);
         if (old) {
-            if (old.content !== content || old.role !== role) {
+            const oldRole = old.role === 'user' ? 'user' : 'assistant';
+            if (oldRole !== role) throw new Error('原文角色与手机原记录冲突，未导入');
+            if (getUwuSyncMessageText(old) !== content) {
                 old.content = content;
-                old.role = role;
-                old.timestamp = timestamp;
-                if (sourceId) old.memorySyncSourceId = sourceId;
+                old.parts = [{ type: 'text', text: content }];
                 updated += 1;
             }
+            old.memorySyncSourceId = sourceId;
             return;
         }
         const message = {
-            id: `sync:${sourceId || `${role}:${timestamp}:${inserted}`}`,
-            role,
-            content,
-            timestamp,
+            id: `sync:${sourceId}`, role, content, timestamp,
+            memorySyncSourceId: sourceId,
+            parts: [{ type: 'text', text: content }],
         };
-        if (sourceId) message.memorySyncSourceId = sourceId;
-        existing.push(message);
-        existingByKey.set(key, message);
+        nextChat.history.push(message);
+        existingByKey.set(sourceId, message);
         inserted += 1;
     });
-    existing.sort((a, b) => (Number(a && a.timestamp || 0) - Number(b && b.timestamp || 0)));
-    chat.history = existing;
-    if (typeof saveCharacter === 'function') await saveCharacter(chat.id);
-
-    const coreRecord = await ensureCoreMemoryRecord(chatType, chatId, { chat });
-    coreRecord.items = mergeCoreMemoryItems(coreRecord.items || [], bundle.core_memory_items || [], 'merge');
-    await saveCoreMemoryRecord(coreRecord);
-
-    let shortCount = 0;
-    if (Array.isArray(bundle.short_context_items) && bundle.short_context_items.length) {
-        const shortRecord = getShortMemoryRecordSync(chatType, chatId);
-        const current = bundle.source === 'memory_palace_bot'
-            ? []
-            : (shortRecord && Array.isArray(shortRecord.items) ? shortRecord.items : []);
-        const seen = new Set(current.map(item => `${item.role}|${item.content}`));
-        const merged = current.slice();
-        bundle.short_context_items.forEach(item => {
-            const role = String(item && item.role || '').trim().toLowerCase();
-            const content = String(item && item.content || '').trim();
-            if (!['user', 'assistant'].includes(role) || !content) return;
-            const key = `${role}|${content}`;
-            if (seen.has(key)) return;
-            seen.add(key);
-            merged.push({ role, content, timestamp: Number(item.timestamp || 0) || Date.now() });
-        });
-        await saveShortMemoryItemsForChat(chatType, chatId, merged, {
-            chat,
-            sourceUserName: shortRecord && shortRecord.sourceUserName,
-            useShadowContext: true,
-            sourceProtocol: 'uwu_memory_sync_bundle',
-        });
-        shortCount = merged.length;
+    if (inserted) nextChat.history.sort((a, b) => Number(a.timestamp || 0) - Number(b.timestamp || 0));
+    const coreRecord = copy(getCoreMemoryRecordSync(chatType, chatId) || {
+        chatKey, chatId, chatType, settings: getCoreMemoryDefaultSettings(),
+        items: [], lastSummarizedRound: 0, createdAt: Date.now(),
+    });
+    const previousSummaryCount = coreRecord.items.length;
+    coreRecord.items = mergeCoreMemoryItems(coreRecord.items, bundle.core_memory_items, 'merge');
+    coreRecord.updatedAt = Date.now();
+    const previousShort = getShortMemoryRecordSync(chatType, chatId);
+    let shortRecord = null;
+    if (Array.isArray(bundle.short_context_items)) {
+        shortRecord = copy(previousShort || { chatKey, chatId, chatType, createdAt: Date.now() });
+        shortRecord.items = bundle.short_context_items.map((item, index) => ({
+            role: item.role, content: item.content,
+            timestamp: Number(item.timestamp || 0) || Date.now() + index,
+        }));
+        shortRecord.useShadowContext = true;
+        shortRecord.sourceUserName = String(bundle.user_id || '11');
+        shortRecord.sourceProtocol = 'uwu_memory_sync_bundle';
+        shortRecord.updatedAt = Date.now();
+        coreRecord.lastSyncImportBackup = {
+            shortContext: previousShort, lastSummarizedRound: coreRecord.lastSummarizedRound,
+        };
+        const count = shortMemoryItemsToRounds(shortRecord.items).length;
+        coreRecord.lastSummarizedRound = bundle.summary_cursor_kind === 'short_context_rounds'
+            ? Math.min(count, Math.max(0, Math.floor(Number(bundle.short_context_summary_cursor) || 0))) : 0;
     }
+    // Publish in-memory changes only after every IndexedDB write commits.
+    // A quota/permission/transaction failure leaves all three old records intact.
+    await dexieDB.transaction('rw', dexieDB.characters, dexieDB.coreMemoryFiles, dexieDB.shortMemoryContexts, async () => {
+        await dexieDB.characters.put(nextChat);
+        await dexieDB.coreMemoryFiles.put(coreRecord);
+        if (shortRecord) await dexieDB.shortMemoryContexts.put(shortRecord);
+    });
+    Object.assign(chat, nextChat);
+    const updateCache = (field, record) => {
+        if (!record) return;
+        const list = Array.isArray(db[field]) ? db[field] : (db[field] = []);
+        const index = list.findIndex(item => item.chatKey === chatKey);
+        if (index < 0) list.push(record);
+        else list[index] = record;
+    };
+    updateCache('coreMemoryFiles', coreRecord);
+    updateCache('shortMemoryContexts', shortRecord);
     return {
-        insertedRawMessages: inserted,
-        updatedRawMessages: updated,
-        coreMemoryCount: Array.isArray(bundle.core_memory_items) ? bundle.core_memory_items.length : 0,
-        shortContextCount: shortCount,
+        insertedRawMessages: inserted, updatedRawMessages: updated,
+        coreMemoryCount: coreRecord.items.length - previousSummaryCount,
+        shortContextCount: shortRecord ? shortRecord.items.length : 0,
     };
 }
 
