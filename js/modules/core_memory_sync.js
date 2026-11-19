@@ -46,6 +46,8 @@ function getUwuSyncMessageText(message) {
 }
 
 function getUwuSyncSourceId(chatKey, roundIndex, role, message, fallbackText) {
+    const syncSourceId = message && message.memorySyncSourceId;
+    if (syncSourceId) return String(syncSourceId);
     const supplied = message && (message.id || message.messageId);
     if (supplied) return `uwu:${chatKey}:${role}:${supplied}`;
     const stamp = message && message.timestamp || 0;
@@ -194,14 +196,19 @@ function buildUwuMemorySyncBundle() {
     const chatKey = typeof getCoreMemoryChatKey === 'function' ? getCoreMemoryChatKey(chatType, chatId) : `${chatType}:${chatId}`;
     const allRaw = buildUwuSyncRawMessages(rounds, 0, chatKey, {}).messages;
     const scope = getUwuLocalSyncScope();
+    const shortRecord = typeof getShortMemoryRecordSync === 'function'
+        ? getShortMemoryRecordSync(chatType, chatId)
+        : null;
     return {
         protocol: 'uwu-memory-sync-bundle-v1',
         exported_at: new Date().toISOString(),
+        source: 'uwu',
         source_chat_key: chatKey,
         user_id: scope.userId,
         char_id: scope.charId,
         raw_messages: allRaw,
         core_memory_items: record && Array.isArray(record.items) ? record.items : [],
+        short_context_items: shortRecord && Array.isArray(shortRecord.items) ? shortRecord.items : [],
         total_completed_rounds: rounds.length,
         last_summarized_round: Math.max(0, parseInt(record && record.lastSummarizedRound, 10) || 0),
     };
@@ -222,6 +229,111 @@ function downloadUwuMemorySyncBundle() {
     // Revoke on the next turn so the file is not truncated on those browsers.
     setTimeout(() => URL.revokeObjectURL(url), 1000);
     return bundle;
+}
+
+function getUwuImportedMessageKey(item) {
+    const source = String(item && (item.memorySyncSourceId || item.syncSourceId || '') || '').trim();
+    if (source) return `source:${source}`;
+    const role = String(item && item.role || '').trim().toLowerCase();
+    const content = getUwuSyncMessageText(item).trim();
+    const timestamp = Number(item && item.timestamp || 0) || 0;
+    return `content:${role}|${timestamp}|${content}`;
+}
+
+async function importUwuMemorySyncBundle(file) {
+    if (!file) throw new Error('请选择同步包 JSON 文件');
+    const text = await (typeof file.text === 'function'
+        ? file.text()
+        : new Promise((resolve, reject) => {
+            const reader = new FileReader();
+            reader.onload = () => resolve(String(reader.result || ''));
+            reader.onerror = () => reject(reader.error || new Error('读取文件失败'));
+            reader.readAsText(file, 'utf-8');
+        }));
+    let bundle;
+    try { bundle = JSON.parse(text); }
+    catch (_) { throw new Error('同步包不是有效 JSON'); }
+    if (!bundle || bundle.protocol !== 'uwu-memory-sync-bundle-v1'
+        || !Array.isArray(bundle.raw_messages)
+        || !Array.isArray(bundle.core_memory_items)) {
+        throw new Error('文件不是 uwu / Bot 同步包');
+    }
+    const { chat, chatType, chatId } = getUwuSyncChatContext();
+    if (!chat || !chatId || !Array.isArray(chat.history)) throw new Error('请先打开要导入的 uwu 私聊');
+
+    const existingByKey = new Map();
+    const existing = Array.isArray(chat.history) ? chat.history : [];
+    existing.forEach(item => existingByKey.set(getUwuImportedMessageKey(item), item));
+    let inserted = 0;
+    let updated = 0;
+    (bundle.raw_messages || []).forEach(item => {
+        const role = String(item && item.role || '').trim().toLowerCase();
+        const content = String(item && item.content || '').trim();
+        if (!['user', 'assistant'].includes(role) || !content) return;
+        const sourceId = String(item.source_id || '').trim();
+        const timestamp = Number(item.timestamp_ms || item.timestamp || 0) || Date.now();
+        const key = sourceId ? `source:${sourceId}` : `content:${role}|${timestamp}|${content}`;
+        const old = existingByKey.get(key);
+        if (old) {
+            if (old.content !== content || old.role !== role) {
+                old.content = content;
+                old.role = role;
+                old.timestamp = timestamp;
+                if (sourceId) old.memorySyncSourceId = sourceId;
+                updated += 1;
+            }
+            return;
+        }
+        const message = {
+            id: `sync:${sourceId || `${role}:${timestamp}:${inserted}`}`,
+            role,
+            content,
+            timestamp,
+        };
+        if (sourceId) message.memorySyncSourceId = sourceId;
+        existing.push(message);
+        existingByKey.set(key, message);
+        inserted += 1;
+    });
+    existing.sort((a, b) => (Number(a && a.timestamp || 0) - Number(b && b.timestamp || 0)));
+    chat.history = existing;
+    if (typeof saveCharacter === 'function') await saveCharacter(chat.id);
+
+    const coreRecord = await ensureCoreMemoryRecord(chatType, chatId, { chat });
+    coreRecord.items = mergeCoreMemoryItems(coreRecord.items || [], bundle.core_memory_items || [], 'merge');
+    await saveCoreMemoryRecord(coreRecord);
+
+    let shortCount = 0;
+    if (Array.isArray(bundle.short_context_items) && bundle.short_context_items.length) {
+        const shortRecord = getShortMemoryRecordSync(chatType, chatId);
+        const current = bundle.source === 'memory_palace_bot'
+            ? []
+            : (shortRecord && Array.isArray(shortRecord.items) ? shortRecord.items : []);
+        const seen = new Set(current.map(item => `${item.role}|${item.content}`));
+        const merged = current.slice();
+        bundle.short_context_items.forEach(item => {
+            const role = String(item && item.role || '').trim().toLowerCase();
+            const content = String(item && item.content || '').trim();
+            if (!['user', 'assistant'].includes(role) || !content) return;
+            const key = `${role}|${content}`;
+            if (seen.has(key)) return;
+            seen.add(key);
+            merged.push({ role, content, timestamp: Number(item.timestamp || 0) || Date.now() });
+        });
+        await saveShortMemoryItemsForChat(chatType, chatId, merged, {
+            chat,
+            sourceUserName: shortRecord && shortRecord.sourceUserName,
+            useShadowContext: true,
+            sourceProtocol: 'uwu_memory_sync_bundle',
+        });
+        shortCount = merged.length;
+    }
+    return {
+        insertedRawMessages: inserted,
+        updatedRawMessages: updated,
+        coreMemoryCount: Array.isArray(bundle.core_memory_items) ? bundle.core_memory_items.length : 0,
+        shortContextCount: shortCount,
+    };
 }
 
 async function sendUwuLocalSyncPayload(payload) {
@@ -287,6 +399,7 @@ if (typeof window !== 'undefined') {
     window.buildUwuLocalSyncPayload = buildUwuLocalSyncPayload;
     window.buildUwuMemorySyncBundle = buildUwuMemorySyncBundle;
     window.downloadUwuMemorySyncBundle = downloadUwuMemorySyncBundle;
+    window.importUwuMemorySyncBundle = importUwuMemorySyncBundle;
     window.syncCurrentUwuChatToLocalBot = syncCurrentUwuChatToLocalBot;
     window.flushUwuLocalSyncOutbox = flushUwuLocalSyncOutbox;
 }

@@ -190,6 +190,8 @@ function setupCoreMemoryUI() {
     const exportBtn = document.getElementById('core-memory-export-btn');
     const localSyncBtn = document.getElementById('core-memory-local-sync-btn');
     const bundleExportBtn = document.getElementById('core-memory-sync-bundle-export-btn');
+    const bundleImportBtn = document.getElementById('core-memory-sync-bundle-import-btn');
+    const bundleImportInput = document.getElementById('core-memory-sync-bundle-import-input');
     const autoSwitch = document.getElementById('setting-core-memory-auto-summary');
     const resetStopwordsBtn = document.getElementById('core-memory-reset-stopwords-btn');
     const resetSummaryPromptBtn = document.getElementById('core-memory-reset-summary-prompt-btn');
@@ -236,6 +238,33 @@ function setupCoreMemoryUI() {
                 if (status) status.textContent = `已导出同步包：原文 ${bundle.raw_messages.length} 条，摘要 ${bundle.core_memory_items.length} 条`;
             } catch (error) {
                 if (typeof showToast === 'function') showToast(error.message || '同步包导出失败');
+            }
+        });
+    }
+
+    if (bundleImportBtn && bundleImportInput && !bundleImportBtn.dataset.coreMemoryBound) {
+        bundleImportBtn.dataset.coreMemoryBound = '1';
+        bundleImportBtn.addEventListener('click', () => {
+            bundleImportInput.value = '';
+            bundleImportInput.click();
+        });
+        bundleImportInput.addEventListener('change', async () => {
+            const file = bundleImportInput.files && bundleImportInput.files[0];
+            if (!file || typeof importUwuMemorySyncBundle !== 'function') return;
+            bundleImportBtn.disabled = true;
+            try {
+                const result = await importUwuMemorySyncBundle(file);
+                const status = document.getElementById('core-memory-sync-status');
+                if (status) status.textContent = `已导入同步包：原文新增 ${result.insertedRawMessages} 条、更新 ${result.updatedRawMessages} 条，摘要 ${result.coreMemoryCount} 条，短期上下文 ${result.shortContextCount || 0} 条`;
+                if (typeof showToast === 'function') showToast('Bot 同步包已合并到当前小手机会话');
+                if (typeof loadCoreMemorySettingsToSidebar === 'function') {
+                    const { chat } = getCurrentCoreMemoryContext();
+                    if (chat) loadCoreMemorySettingsToSidebar(chat);
+                }
+            } catch (error) {
+                if (typeof showToast === 'function') showToast(error.message || '同步包导入失败');
+            } finally {
+                bundleImportBtn.disabled = false;
             }
         });
     }

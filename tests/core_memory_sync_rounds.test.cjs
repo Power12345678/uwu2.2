@@ -18,7 +18,8 @@ vm.runInNewContext(
   source + '\nthis.__buildUwuSyncSourceRounds = buildUwuSyncSourceRounds;\n' +
   'this.__buildUwuLocalSyncPayload = buildUwuLocalSyncPayload;\n' +
   'this.__buildUwuSyncRawMessages = buildUwuSyncRawMessages;\n' +
-  'this.__buildUwuMemorySyncBundle = buildUwuMemorySyncBundle;',
+  'this.__buildUwuMemorySyncBundle = buildUwuMemorySyncBundle;\n' +
+  'this.__importUwuMemorySyncBundle = importUwuMemorySyncBundle;',
   context,
 );
 
@@ -98,4 +99,35 @@ assert.deepStrictEqual(Array.from(bundle.raw_messages, item => item.source_id), 
 assert.strictEqual(bundle.core_memory_items.length, 1);
 assert.strictEqual(bundle.settings, undefined);
 assert.strictEqual(JSON.stringify(bundle).includes('must-not-export'), false);
-console.log('core_memory_sync_rounds: ok');
+
+(async () => {
+  context.db.characters[0].history = [];
+  context.saveCharacter = async () => {};
+  context.getCoreMemoryRecordSync = () => ({ chatKey: 'private:c1', items: [] });
+  context.ensureCoreMemoryRecord = async () => ({ chatKey: 'private:c1', items: [] });
+  context.mergeCoreMemoryItems = (oldItems, newItems) => oldItems.concat(newItems);
+  context.saveCoreMemoryRecord = async () => {};
+  context.getShortMemoryRecordSync = () => null;
+  context.saveShortMemoryItemsForChat = async () => {};
+  const importBundle = {
+    protocol: 'uwu-memory-sync-bundle-v1',
+    raw_messages: [
+      { source_id: 'bot:stable:1', role: 'user', content: '从电脑导入', timestamp_ms: 10 },
+      { source_id: 'bot:stable:2', role: 'assistant', content: '已经接上', timestamp_ms: 11 },
+    ],
+    core_memory_items: [{ timestamp: '2026-11-19', summary: '已合并摘要', importance: 4, keywords: [] }],
+    short_context_items: [{ role: 'assistant', content: '最近一轮回复', timestamp: 11 }],
+  };
+  const importFile = { text: async () => JSON.stringify(importBundle) };
+  const firstImport = await context.__importUwuMemorySyncBundle(importFile);
+  const secondImport = await context.__importUwuMemorySyncBundle(importFile);
+  assert.strictEqual(firstImport.insertedRawMessages, 2);
+  assert.strictEqual(secondImport.insertedRawMessages, 0);
+  assert.strictEqual(context.db.characters[0].history[0].memorySyncSourceId, 'bot:stable:1');
+  const returnedBundle = context.__buildUwuMemorySyncBundle();
+  assert.strictEqual(returnedBundle.raw_messages[0].source_id, 'bot:stable:1');
+  console.log('core_memory_sync_rounds: ok');
+})().catch(error => {
+  console.error(error);
+  process.exitCode = 1;
+});
