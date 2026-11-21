@@ -1358,10 +1358,18 @@ async function persistReplyAndRenderedSideEffects(chat, targetChatId, targetChat
         await persistChatWithShortMemory(chat, targetChatType, shortRecord);
     } catch (_) { /* render and retry the complete local save below */ }
 
-    // Apply status/gift/payment/transfer side effects after the first write,
-    // then persist those side effects too. This second write is local only;
-    // it never re-calls the model.
-    for (const args of pendingBubbles) addMessageBubble(...args);
+    // The whole reply is already saved before presentation, so a paused iOS
+    // timer cannot lose the tail of the conversation. Keep the old chat feel
+    // by presenting foreground bubbles one at a time instead of appending the
+    // complete batch in the same task. Hidden/background chats are processed
+    // immediately so notifications and persistence do not depend on timers.
+    const staggerBubbles = !document.hidden && pendingBubbles.length > 1;
+    for (let index = 0; index < pendingBubbles.length; index += 1) {
+        addMessageBubble(...pendingBubbles[index]);
+        if (staggerBubbles && index < pendingBubbles.length - 1) {
+            await new Promise(resolve => setTimeout(resolve, 550));
+        }
+    }
     renderChatList();
     await persistChatWithShortMemory(chat, targetChatType);
 }
